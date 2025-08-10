@@ -1,0 +1,17 @@
+[Unit]
+Description=GPIO Monitor SSE Server
+After=network.target
+Documentation=https://github.com/yourusername/gpio-monitor
+
+[Service]
+Type=simple
+User=pi
+Group=gpio
+ExecStart=/usr/bin/python3 /usr/lib/gpio-monitor/gpio-monitor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
