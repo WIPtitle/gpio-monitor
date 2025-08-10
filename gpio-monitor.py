@@ -85,9 +85,6 @@ class GPIOMonitor:
         self.init_states()
 
     def init_states(self):
-        # Need 10 initial readings before setting any state
-        initial_readings = {}
-
         for pin in self.monitored_pins:
             if pin in self.available_pins:
                 # Configure pull resistor if specified
@@ -95,26 +92,34 @@ class GPIOMonitor:
                 if 'pull' in pin_cfg:
                     configure_pin_pull(pin, pin_cfg['pull'])
 
-                # Collect 10 initial readings
-                readings = []
-                for _ in range(10):
+                # Check if debouncing is enabled for this pin
+                if 'debounce' in pin_cfg:
+                    # Need 10 initial readings for debounced pins
+                    readings = []
+                    for _ in range(10):
+                        try:
+                            value = self.read_gpio(pin)
+                            if value != -1:
+                                readings.append(value)
+                        except:
+                            pass
+                        time.sleep(0.1)
+
+                    if len(readings) >= 6:
+                        initial_state = max(set(readings), key=readings.count)
+                        self.gpio_states[pin] = initial_state
+                        print(f"GPIO{pin} initial state: {initial_state} (debounced)")
+                    else:
+                        print(f"GPIO{pin} initial state: undefined (insufficient readings)")
+                else:
+                    # No debouncing, just read once
                     try:
                         value = self.read_gpio(pin)
                         if value != -1:
-                            readings.append(value)
+                            self.gpio_states[pin] = value
+                            print(f"GPIO{pin} initial state: {value}")
                     except:
                         pass
-                    time.sleep(0.1)
-
-                # Set initial state only if we have enough consistent readings
-                if len(readings) >= 6:
-                    # Use most common value as initial state
-                    initial_state = max(set(readings), key=readings.count)
-                    self.gpio_states[pin] = initial_state
-                    print(f"GPIO{pin} initial state: {initial_state}")
-                else:
-                    # Not enough readings, state remains undefined
-                    print(f"GPIO{pin} initial state: undefined (insufficient readings)")
 
     def read_gpio(self, pin):
         """Read GPIO with appropriate bias if configured"""
@@ -141,6 +146,21 @@ class GPIOMonitor:
         except:
             return -1
 
+    def get_debounce_threshold(self, pin):
+        """Get debounce threshold for a pin"""
+        pin_cfg = PIN_CONFIG.get(str(pin), {})
+        debounce_level = pin_cfg.get('debounce', None)
+
+        if debounce_level is None:
+            return None  # No debouncing
+
+        thresholds = {
+            'LOW': 3,
+            'MEDIUM': 5,
+            'HIGH': 7
+        }
+        return thresholds.get(debounce_level, None)
+
     def monitor_loop(self):
         while True:
             if self.monitored_pins:
@@ -154,87 +174,107 @@ class GPIOMonitor:
 
                         # Check if we have an established state for this pin
                         if pin not in self.gpio_states:
-                            # No initial state yet, skip
                             continue
 
                         current_state = self.gpio_states[pin]
+                        debounce_threshold = self.get_debounce_threshold(pin)
 
-                        # Check if this reading differs from current state
-                        if current_reading != current_state:
-                            # Potential state change detected
-                            if pin not in self.gpio_pending_changes:
-                                # Start tracking this potential change
-                                self.gpio_pending_changes[pin] = {
-                                    'readings': [current_reading],
-                                    'old_state': current_state,
-                                    'new_state': current_reading
+                        # If no debouncing, emit event immediately on change
+                        if debounce_threshold is None:
+                            if current_reading != current_state:
+                                # Immediate state change
+                                old_value = current_state
+                                new_value = current_reading
+                                self.gpio_states[pin] = new_value
+
+                                event_type = "rising" if new_value == 1 else "falling"
+
+                                event_data = {
+                                    "pin": pin,
+                                    "state": new_value,
+                                    "previous": old_value,
+                                    "timestamp": int(time.time() * 1000),
+                                    "time": datetime.now().strftime("%H:%M:%S.%f")[:-3]
                                 }
-                            else:
-                                # Add to existing pending change readings
-                                pending = self.gpio_pending_changes[pin]
-                                pending['readings'].append(current_reading)
 
-                                # Check if we have collected 10 readings
-                                if len(pending['readings']) >= 10:
-                                    # Count how many readings match the new state
-                                    new_state_count = pending['readings'].count(pending['new_state'])
-
-                                    if new_state_count >= 6:
-                                        # Confirmed state change
-                                        old_value = pending['old_state']
-                                        new_value = pending['new_state']
-
-                                        self.gpio_states[pin] = new_value
-
-                                        event_type = "rising" if new_value == 1 else "falling"
-
-                                        event_data = {
-                                            "pin": pin,
-                                            "state": new_value,
-                                            "previous": old_value,
-                                            "timestamp": int(time.time() * 1000),
-                                            "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-                                            "confidence": f"{new_state_count}/10"
-                                        }
-
-                                        self.broadcast_event(f"gpio_{event_type}", event_data)
-
-                                    # Clear pending change regardless of outcome
-                                    del self.gpio_pending_changes[pin]
+                                self.broadcast_event(f"gpio_{event_type}", event_data)
                         else:
-                            # Reading matches current state
-                            if pin in self.gpio_pending_changes:
-                                # We were tracking a potential change
-                                pending = self.gpio_pending_changes[pin]
-                                pending['readings'].append(current_reading)
+                            # Debouncing enabled for this pin
+                            if current_reading != current_state:
+                                # Potential state change detected
+                                if pin not in self.gpio_pending_changes:
+                                    # Start tracking this potential change
+                                    self.gpio_pending_changes[pin] = {
+                                        'readings': [current_reading],
+                                        'old_state': current_state,
+                                        'new_state': current_reading
+                                    }
+                                else:
+                                    # Add to existing pending change readings
+                                    pending = self.gpio_pending_changes[pin]
+                                    pending['readings'].append(current_reading)
 
-                                # Check if we have 10 readings
-                                if len(pending['readings']) >= 10:
-                                    # Count readings for new state
-                                    new_state_count = pending['readings'].count(pending['new_state'])
+                                    # Check if we have collected 10 readings
+                                    if len(pending['readings']) >= 10:
+                                        # Count how many readings match the new state
+                                        new_state_count = pending['readings'].count(pending['new_state'])
 
-                                    if new_state_count >= 6:
-                                        # Confirmed state change
-                                        old_value = pending['old_state']
-                                        new_value = pending['new_state']
+                                        if new_state_count >= debounce_threshold:
+                                            # Confirmed state change
+                                            old_value = pending['old_state']
+                                            new_value = pending['new_state']
 
-                                        self.gpio_states[pin] = new_value
+                                            self.gpio_states[pin] = new_value
 
-                                        event_type = "rising" if new_value == 1 else "falling"
+                                            event_type = "rising" if new_value == 1 else "falling"
 
-                                        event_data = {
-                                            "pin": pin,
-                                            "state": new_value,
-                                            "previous": old_value,
-                                            "timestamp": int(time.time() * 1000),
-                                            "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-                                            "confidence": f"{new_state_count}/10"
-                                        }
+                                            event_data = {
+                                                "pin": pin,
+                                                "state": new_value,
+                                                "previous": old_value,
+                                                "timestamp": int(time.time() * 1000),
+                                                "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                                                "confidence": f"{new_state_count}/10"
+                                            }
 
-                                        self.broadcast_event(f"gpio_{event_type}", event_data)
+                                            self.broadcast_event(f"gpio_{event_type}", event_data)
 
-                                    # Clear pending change
-                                    del self.gpio_pending_changes[pin]
+                                        # Clear pending change regardless of outcome
+                                        del self.gpio_pending_changes[pin]
+                            else:
+                                # Reading matches current state
+                                if pin in self.gpio_pending_changes:
+                                    # We were tracking a potential change
+                                    pending = self.gpio_pending_changes[pin]
+                                    pending['readings'].append(current_reading)
+
+                                    # Check if we have 10 readings
+                                    if len(pending['readings']) >= 10:
+                                        # Count readings for new state
+                                        new_state_count = pending['readings'].count(pending['new_state'])
+
+                                        if new_state_count >= debounce_threshold:
+                                            # Confirmed state change
+                                            old_value = pending['old_state']
+                                            new_value = pending['new_state']
+
+                                            self.gpio_states[pin] = new_value
+
+                                            event_type = "rising" if new_value == 1 else "falling"
+
+                                            event_data = {
+                                                "pin": pin,
+                                                "state": new_value,
+                                                "previous": old_value,
+                                                "timestamp": int(time.time() * 1000),
+                                                "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                                                "confidence": f"{new_state_count}/10"
+                                            }
+
+                                            self.broadcast_event(f"gpio_{event_type}", event_data)
+
+                                        # Clear pending change
+                                        del self.gpio_pending_changes[pin]
 
             time.sleep(POLL_INTERVAL)
 

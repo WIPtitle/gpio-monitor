@@ -1,7 +1,7 @@
 [Unit]
 Description=GPIO Monitor SSE Server
 After=network.target
-Documentation=https://github.com/yourusername/gpio-monitor
+Documentation=https://github.com/WIPtitle/gpio-monitor
 
 [Service]
 Type=simple

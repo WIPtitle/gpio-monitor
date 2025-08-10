@@ -113,16 +113,102 @@ def remove_pin(pin):
         sys.exit(1)
 
 
+def set_debounce(pin, level):
+    """Set debounce level for a GPIO pin"""
+    try:
+        pin = int(pin)
+        level = level.upper()
+
+        if level not in ['LOW', 'MEDIUM', 'HIGH']:
+            print("Error: Level must be 'LOW', 'MEDIUM', or 'HIGH'")
+            print("  LOW    = 3/10 readings needed (fast, less filtering)")
+            print("  MEDIUM = 5/10 readings needed (balanced)")
+            print("  HIGH   = 7/10 readings needed (slow, more filtering)")
+            sys.exit(1)
+
+        config = load_config()
+        monitored = config.get("monitored_pins", [])
+
+        if pin not in monitored:
+            print(f"Error: GPIO {pin} is not being monitored")
+            print(f"Add it first with: gpio-monitor add-pin {pin}")
+            sys.exit(1)
+
+        pin_config = config.get("pin_config", {})
+        if str(pin) not in pin_config:
+            pin_config[str(pin)] = {}
+
+        pin_config[str(pin)]['debounce'] = level
+
+        thresholds = {'LOW': 3, 'MEDIUM': 5, 'HIGH': 7}
+        print(f"Set GPIO {pin} debouncing to {level} ({thresholds[level]}/10 readings required)")
+        print("Events will be delayed by ~1 second for stability")
+
+        config["pin_config"] = pin_config
+        save_config(config)
+        restart_service()
+
+    except ValueError:
+        print("Error: Invalid pin number")
+        sys.exit(1)
+
+
+def remove_debounce(pin):
+    """Remove debounce configuration for a GPIO pin"""
+    try:
+        pin = int(pin)
+
+        config = load_config()
+        monitored = config.get("monitored_pins", [])
+
+        if pin not in monitored:
+            print(f"Error: GPIO {pin} is not being monitored")
+            sys.exit(1)
+
+        pin_config = config.get("pin_config", {})
+        if str(pin) in pin_config and 'debounce' in pin_config[str(pin)]:
+            del pin_config[str(pin)]['debounce']
+            print(f"Removed debouncing from GPIO {pin}")
+            print("Events will now be emitted immediately on state change")
+        else:
+            print(f"GPIO {pin} does not have debouncing configured")
+
+        config["pin_config"] = pin_config
+        save_config(config)
+        restart_service()
+
+    except ValueError:
+        print("Error: Invalid pin number")
+        sys.exit(1)
+
+
 def list_pins():
     config = load_config()
     monitored = config.get("monitored_pins", [])
     available = get_available_pins()
     reserved = get_pin_info()
+    pin_config = config.get("pin_config", {})
 
     print("GPIO Pin Status")
-    print("-" * 50)
+    print("-" * 60)
     print(f"Monitored pins: {monitored if monitored else 'None'}")
     print(f"Available pins: {available}")
+
+    if monitored:
+        print("\nPin Configuration:")
+        for pin in monitored:
+            configs = []
+            if str(pin) in pin_config:
+                cfg = pin_config[str(pin)]
+                if 'pull' in cfg:
+                    configs.append(f"pull-{cfg['pull']}")
+                if 'debounce' in cfg:
+                    thresholds = {'LOW': 3, 'MEDIUM': 5, 'HIGH': 7}
+                    thresh = thresholds.get(cfg['debounce'], '?')
+                    configs.append(f"debounce-{cfg['debounce']}({thresh}/10)")
+
+            config_str = ", ".join(configs) if configs else "no special config"
+            print(f"  GPIO {pin:2d}: {config_str}")
 
     if reserved:
         print("\nPins with special functions:")
@@ -240,27 +326,35 @@ def show_help():
     print("GPIO Monitor Control")
     print("")
     print("Pin Management:")
-    print("  gpio-monitor add-pin <pin>       Add a GPIO pin to monitor")
-    print("  gpio-monitor remove-pin <pin>    Remove a GPIO pin from monitoring")
-    print("  gpio-monitor set-pull <pin> <mode>  Set pull resistor (up/down/none)")
-    print("  gpio-monitor list-pins           List all monitored and available pins")
-    print("  gpio-monitor clear-pins          Remove all pins from monitoring")
+    print("  gpio-monitor add-pin <pin>           Add a GPIO pin to monitor")
+    print("  gpio-monitor remove-pin <pin>        Remove a GPIO pin from monitoring")
+    print("  gpio-monitor list-pins               List all monitored and available pins")
+    print("  gpio-monitor clear-pins              Remove all pins from monitoring")
+    print("")
+    print("Pin Configuration:")
+    print("  gpio-monitor set-pull <pin> <mode>   Set pull resistor (up/down/none)")
+    print("  gpio-monitor set-debounce <pin> <level>  Set debouncing (LOW/MEDIUM/HIGH)")
+    print("  gpio-monitor remove-debounce <pin>   Remove debouncing (immediate events)")
     print("")
     print("Service Control:")
-    print("  gpio-monitor status              Show current configuration and status")
-    print("  gpio-monitor set-port <port>     Set the monitor port")
-    print("  gpio-monitor restart              Restart the monitor service")
-    print("  gpio-monitor stop                 Stop the monitor service")
-    print("  gpio-monitor start                Start the monitor service")
-    print("  gpio-monitor logs                 Show service logs")
+    print("  gpio-monitor status                  Show current configuration and status")
+    print("  gpio-monitor set-port <port>         Set the monitor port")
+    print("  gpio-monitor restart                  Restart the monitor service")
+    print("  gpio-monitor stop                     Stop the monitor service")
+    print("  gpio-monitor start                    Start the monitor service")
+    print("  gpio-monitor logs                     Show service logs")
+    print("")
+    print("Debounce Levels:")
+    print("  LOW    = 3/10 readings (300ms min delay, less filtering)")
+    print("  MEDIUM = 5/10 readings (500ms min delay, balanced)")
+    print("  HIGH   = 7/10 readings (700ms min delay, more filtering)")
     print("")
     print("Examples:")
-    print("  gpio-monitor add-pin 17          Add GPIO17 to monitoring")
-    print("  gpio-monitor set-pull 17 down    Set pull-down for reed switch on VCC")
-    print("  gpio-monitor set-pull 17 up      Set pull-up for reed switch on GND")
-    print("  gpio-monitor remove-pin 17       Stop monitoring GPIO17")
-    print("  gpio-monitor list-pins           Show all pin statuses")
-    print("  gpio-monitor set-port 8080       Change port to 8080")
+    print("  gpio-monitor add-pin 17              Add GPIO17 to monitoring")
+    print("  gpio-monitor set-pull 17 down        Set pull-down for reed switch")
+    print("  gpio-monitor set-debounce 17 HIGH    Enable strong debouncing")
+    print("  gpio-monitor remove-debounce 17      Disable debouncing")
+    print("  gpio-monitor list-pins               Show all configurations")
 
 
 def main():
@@ -278,6 +372,10 @@ def main():
         remove_pin(sys.argv[2])
     elif command == "set-pull" and len(sys.argv) == 4:
         set_pull(sys.argv[2], sys.argv[3])
+    elif command == "set-debounce" and len(sys.argv) == 4:
+        set_debounce(sys.argv[2], sys.argv[3])
+    elif command == "remove-debounce" and len(sys.argv) == 3:
+        remove_debounce(sys.argv[2])
     elif command == "list-pins":
         list_pins()
     elif command == "clear-pins":
