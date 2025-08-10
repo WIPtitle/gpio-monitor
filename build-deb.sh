@@ -3,7 +3,7 @@
 PACKAGE_NAME="gpio-monitor"
 VERSION="1.0.0"
 ARCH="all"
-MAINTAINER="Your Name <your.email@example.com>"
+MAINTAINER="Matteo Galvagni <galvagni.matteo@protonmail.com>"
 DESCRIPTION="GPIO real-time monitoring server with SSE support"
 
 BUILD_DIR="./build"
