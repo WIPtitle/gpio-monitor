@@ -1,10 +1,10 @@
 #!/bin/bash
 
 PACKAGE_NAME="gpio-monitor"
-VERSION="1.0.0"
+VERSION="2.0.0"
 ARCH="all"
 MAINTAINER="Matteo Galvagni <galvagni.matteo@protonmail.com>"
-DESCRIPTION="GPIO real-time monitoring server with SSE support"
+DESCRIPTION="GPIO real-time monitoring server with SSE and REST API support"
 
 BUILD_DIR="./build"
 PACKAGE_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${VERSION}_${ARCH}"
@@ -19,6 +19,7 @@ mkdir -p ${PACKAGE_DIR}/usr/lib/gpio-monitor
 mkdir -p ${PACKAGE_DIR}/usr/bin
 mkdir -p ${PACKAGE_DIR}/etc/gpio-monitor
 mkdir -p ${PACKAGE_DIR}/lib/systemd/system
+mkdir -p ${PACKAGE_DIR}/usr/share/doc/gpio-monitor
 
 cat > ${PACKAGE_DIR}/DEBIAN/control << EOF
 Package: ${PACKAGE_NAME}
@@ -31,7 +32,7 @@ Description: ${DESCRIPTION}
  GPIO Monitor provides a real-time web interface for monitoring
  Raspberry Pi GPIO pin states using Server-Sent Events (SSE).
  Features include automatic state change detection, web dashboard,
- and RESTful event streaming.
+ RESTful API for dynamic pin management, and no-restart configuration updates.
 Depends: python3 (>= 3.7), systemd
 EOF
 
@@ -47,15 +48,22 @@ systemctl daemon-reload
 systemctl enable gpio-monitor.service
 systemctl start gpio-monitor.service
 
-echo "GPIO Monitor installed successfully!"
 echo ""
-echo "Quick Start:"
-echo "  1. Add pins to monitor: sudo gpio-monitor add-pin 17"
-echo "  2. Add more pins: sudo gpio-monitor add-pin 27"
-echo "  3. View status: gpio-monitor status"
-echo "  4. Access web UI: http://localhost:8787"
+echo "GPIO Monitor v2.0 installed successfully!"
 echo ""
-echo "Use 'gpio-monitor help' for all commands"
+echo "COMMANDS:"
+echo "  gpio-monitor add-pin <pin>      - Add GPIO pin to monitoring"
+echo "  gpio-monitor remove-pin <pin>   - Remove GPIO pin"
+echo "  gpio-monitor list-pins          - List all pins"
+echo "  gpio-monitor set-pull <pin> <mode>     - Set pull resistor (up/down/none)"
+echo "  gpio-monitor set-debounce <pin> <level> - Set debouncing (LOW/MEDIUM/HIGH)"
+echo "  gpio-monitor status             - Show current status"
+echo "  gpio-monitor help               - Show all commands"
+echo ""
+echo "ACCESS:"
+echo "  Web interface: http://localhost:8787"
+echo "  REST API documentation: /usr/share/doc/gpio-monitor/gpio-monitor-openapi.yaml"
+echo ""
 
 exit 0
 EOF
@@ -98,6 +106,19 @@ chmod 644 ${PACKAGE_DIR}/lib/systemd/system/gpio-monitor.service
 
 echo '{"port": 8787, "monitored_pins": []}' > ${PACKAGE_DIR}/etc/gpio-monitor/config.json
 chmod 644 ${PACKAGE_DIR}/etc/gpio-monitor/config.json
+
+# Copy documentation
+if [ -f README.md ]; then
+    cp README.md ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/
+fi
+
+if [ -f gpio-monitor-openapi.yaml ]; then
+    cp gpio-monitor-openapi.yaml ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/
+    chmod 644 ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/gpio-monitor-openapi.yaml
+fi
+
+# Create a version file
+echo "${VERSION}" > ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/VERSION
 
 dpkg-deb --build ${PACKAGE_DIR}
 

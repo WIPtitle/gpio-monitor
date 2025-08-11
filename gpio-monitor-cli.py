@@ -85,7 +85,6 @@ def add_pin(pin):
             save_config(config)
             print(f"Added GPIO {pin} to monitoring")
             print(f"Currently monitoring: {monitored}")
-            restart_service()
 
     except ValueError:
         print("Error: Invalid pin number")
@@ -103,10 +102,16 @@ def remove_pin(pin):
         else:
             monitored.remove(pin)
             config["monitored_pins"] = monitored
+
+            # Also remove pin configuration
+            pin_config = config.get("pin_config", {})
+            if str(pin) in pin_config:
+                del pin_config[str(pin)]
+                config["pin_config"] = pin_config
+
             save_config(config)
             print(f"Removed GPIO {pin} from monitoring")
             print(f"Currently monitoring: {monitored if monitored else 'None'}")
-            restart_service()
 
     except ValueError:
         print("Error: Invalid pin number")
@@ -146,7 +151,6 @@ def set_debounce(pin, level):
 
         config["pin_config"] = pin_config
         save_config(config)
-        restart_service()
 
     except ValueError:
         print("Error: Invalid pin number")
@@ -175,7 +179,6 @@ def remove_debounce(pin):
 
         config["pin_config"] = pin_config
         save_config(config)
-        restart_service()
 
     except ValueError:
         print("Error: Invalid pin number")
@@ -227,9 +230,9 @@ def list_pins():
 def clear_pins():
     config = load_config()
     config["monitored_pins"] = []
+    config["pin_config"] = {}  # Also clear pin configurations
     save_config(config)
     print("Cleared all monitored pins")
-    restart_service()
 
 
 def set_port(port):
@@ -240,10 +243,17 @@ def set_port(port):
             sys.exit(1)
 
         config = load_config()
+        old_port = config.get("port", 8787)
+
+        if old_port == port:
+            print(f"Port is already set to {port}")
+            return
+
         config["port"] = port
         save_config(config)
 
         print(f"Port set to {port}")
+        print("Port changes require service restart")
         restart_service()
 
     except ValueError:
@@ -276,10 +286,7 @@ def get_status():
         print(f"Service status: {status}")
 
         if status == "active":
-            print(f"Monitor URL: http://localhost:{port}")
-            if not monitored:
-                print("\nWarning: No pins configured for monitoring!")
-                print("Use 'gpio-monitor add-pin <number>' to add pins")
+            print(f"Web interface: http://localhost:{port}")
     except:
         print("Service status: unknown")
 
@@ -314,8 +321,6 @@ def set_pull(pin, mode):
 
         config["pin_config"] = pin_config
         save_config(config)
-        print("Configuration saved. Restarting service...")
-        restart_service()
 
     except ValueError:
         print("Error: Invalid pin number")
@@ -334,27 +339,23 @@ def show_help():
     print("Pin Configuration:")
     print("  gpio-monitor set-pull <pin> <mode>   Set pull resistor (up/down/none)")
     print("  gpio-monitor set-debounce <pin> <level>  Set debouncing (LOW/MEDIUM/HIGH)")
-    print("  gpio-monitor remove-debounce <pin>   Remove debouncing (immediate events)")
+    print("  gpio-monitor remove-debounce <pin>   Remove debouncing")
     print("")
     print("Service Control:")
     print("  gpio-monitor status                  Show current configuration and status")
-    print("  gpio-monitor set-port <port>         Set the monitor port")
+    print("  gpio-monitor set-port <port>         Set the monitor port (requires restart)")
     print("  gpio-monitor restart                  Restart the monitor service")
     print("  gpio-monitor stop                     Stop the monitor service")
     print("  gpio-monitor start                    Start the monitor service")
     print("  gpio-monitor logs                     Show service logs")
     print("")
-    print("Debounce Levels:")
-    print("  LOW    = 3/10 readings (300ms min delay, less filtering)")
-    print("  MEDIUM = 5/10 readings (500ms min delay, balanced)")
-    print("  HIGH   = 7/10 readings (700ms min delay, more filtering)")
+    print("REST API:")
+    print("  OpenAPI schema: /usr/share/doc/gpio-monitor/gpio-monitor-openapi.yaml")
     print("")
-    print("Examples:")
-    print("  gpio-monitor add-pin 17              Add GPIO17 to monitoring")
-    print("  gpio-monitor set-pull 17 down        Set pull-down for reed switch")
-    print("  gpio-monitor set-debounce 17 HIGH    Enable strong debouncing")
-    print("  gpio-monitor remove-debounce 17      Disable debouncing")
-    print("  gpio-monitor list-pins               Show all configurations")
+    print("Debounce Levels:")
+    print("  LOW    = 3/10 readings (less filtering)")
+    print("  MEDIUM = 5/10 readings (balanced)")
+    print("  HIGH   = 7/10 readings (more filtering)")
 
 
 def main():

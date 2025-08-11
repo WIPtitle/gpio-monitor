@@ -8,7 +8,9 @@ import time
 import threading
 import os
 import sys
+import urllib.parse
 from datetime import datetime
+from pathlib import Path
 
 CONFIG_FILE = "/etc/gpio-monitor/config.json"
 DEFAULT_PORT = 8787
@@ -20,6 +22,12 @@ def load_config():
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
     return {"port": DEFAULT_PORT, "monitored_pins": [], "pin_config": {}}
+
+
+def save_config(config):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
 
 
 def get_available_gpio_pins():
@@ -43,89 +51,111 @@ def get_available_gpio_pins():
     return sorted(available_pins)
 
 
-config = load_config()
-PORT = config.get("port", DEFAULT_PORT)
-MONITORED_PINS = config.get("monitored_pins", [])
-PIN_CONFIG = config.get("pin_config", {})
-
-
-def configure_pin_pull(pin, pull_mode):
-    """Configure pull resistor for a GPIO pin using gpioset with bias
-    pull_mode: 'up', 'down', or 'none'
-    """
-    try:
-        bias_flag = {
-            'up': 'pull-up',
-            'down': 'pull-down',
-            'none': 'disable'
-        }.get(pull_mode)
-
-        if bias_flag:
-            # Note: gpioset with bias doesn't persist, but gpioget with bias does read correctly
-            # The monitoring loop will use gpioget with the same bias
-            print(f"GPIO{pin} configured for pull-{pull_mode}")
-    except Exception as e:
-        print(f"Note: Could not configure pull resistor for GPIO{pin}")
+def get_pin_info():
+    """Get pin categories and warnings"""
+    reserved_pins = {
+        0: "ID_SD (HAT EEPROM)",
+        1: "ID_SC (HAT EEPROM)",
+        2: "SDA1 (I2C)",
+        3: "SCL1 (I2C)",
+        14: "TXD0 (UART)",
+        15: "RXD0 (UART)"
+    }
+    return reserved_pins
 
 
 class GPIOMonitor:
     def __init__(self):
         self.gpio_states = {}
-        self.gpio_pending_changes = {}  # Track pending state changes for debouncing
+        self.gpio_pending_changes = {}
         self.clients = []
-        self.monitored_pins = MONITORED_PINS
+        self.config_lock = threading.Lock()
         self.available_pins = get_available_gpio_pins()
+        self.reserved_pins = get_pin_info()
 
-        if self.monitored_pins:
-            print(f"Monitoring {len(self.monitored_pins)} GPIO pins: {self.monitored_pins}")
+        # Load initial config
+        self.reload_config()
+
+        # Start config watcher thread
+        self.config_watcher_thread = threading.Thread(target=self.config_watcher, daemon=True)
+        self.config_watcher_thread.start()
+
+    def reload_config(self):
+        """Reload configuration and update monitoring"""
+        with self.config_lock:
+            config = load_config()
+            self.monitored_pins = config.get("monitored_pins", [])
+            self.pin_config = config.get("pin_config", {})
+
+            # Remove states for pins no longer monitored
+            for pin in list(self.gpio_states.keys()):
+                if pin not in self.monitored_pins:
+                    del self.gpio_states[pin]
+                    if pin in self.gpio_pending_changes:
+                        del self.gpio_pending_changes[pin]
+
+            # Initialize states for new pins
+            for pin in self.monitored_pins:
+                if pin not in self.gpio_states and pin in self.available_pins:
+                    self.init_pin_state(pin)
+
+    def init_pin_state(self, pin):
+        """Initialize state for a single pin"""
+        pin_cfg = self.pin_config.get(str(pin), {})
+
+        # Configure pull resistor if specified
+        if 'pull' in pin_cfg:
+            self.configure_pin_pull(pin, pin_cfg['pull'])
+
+        # Check if debouncing is enabled for this pin
+        if 'debounce' in pin_cfg:
+            # Need 10 initial readings for debounced pins
+            readings = []
+            for _ in range(10):
+                try:
+                    value = self.read_gpio(pin)
+                    if value != -1:
+                        readings.append(value)
+                except:
+                    pass
+                time.sleep(0.1)
+
+            if len(readings) >= 6:
+                initial_state = max(set(readings), key=readings.count)
+                self.gpio_states[pin] = initial_state
         else:
-            print("No GPIO pins configured for monitoring")
-            print("Use 'gpio-monitor add-pin <number>' to add pins to monitor")
+            # No debouncing, just read once
+            try:
+                value = self.read_gpio(pin)
+                if value != -1:
+                    self.gpio_states[pin] = value
+            except:
+                pass
 
-        self.init_states()
+    def configure_pin_pull(self, pin, pull_mode):
+        """Configure pull resistor for a GPIO pin"""
+        # Configuration is handled directly in read_gpio
+        pass
 
-    def init_states(self):
-        for pin in self.monitored_pins:
-            if pin in self.available_pins:
-                # Configure pull resistor if specified
-                pin_cfg = PIN_CONFIG.get(str(pin), {})
-                if 'pull' in pin_cfg:
-                    configure_pin_pull(pin, pin_cfg['pull'])
-
-                # Check if debouncing is enabled for this pin
-                if 'debounce' in pin_cfg:
-                    # Need 10 initial readings for debounced pins
-                    readings = []
-                    for _ in range(10):
-                        try:
-                            value = self.read_gpio(pin)
-                            if value != -1:
-                                readings.append(value)
-                        except:
-                            pass
-                        time.sleep(0.1)
-
-                    if len(readings) >= 6:
-                        initial_state = max(set(readings), key=readings.count)
-                        self.gpio_states[pin] = initial_state
-                        print(f"GPIO{pin} initial state: {initial_state} (debounced)")
-                    else:
-                        print(f"GPIO{pin} initial state: undefined (insufficient readings)")
-                else:
-                    # No debouncing, just read once
-                    try:
-                        value = self.read_gpio(pin)
-                        if value != -1:
-                            self.gpio_states[pin] = value
-                            print(f"GPIO{pin} initial state: {value}")
-                    except:
-                        pass
+    def config_watcher(self):
+        """Watch for config file changes"""
+        last_mtime = 0
+        while True:
+            try:
+                if os.path.exists(CONFIG_FILE):
+                    current_mtime = os.path.getmtime(CONFIG_FILE)
+                    if current_mtime > last_mtime:
+                        last_mtime = current_mtime
+                        time.sleep(0.1)  # Small delay to ensure file is fully written
+                        self.reload_config()
+            except:
+                pass
+            time.sleep(1)
 
     def read_gpio(self, pin):
         """Read GPIO with appropriate bias if configured"""
         try:
-            # Check if pin has pull configuration
-            pin_cfg = PIN_CONFIG.get(str(pin), {})
+            pin_cfg = self.pin_config.get(str(pin), {})
 
             if 'pull' in pin_cfg:
                 bias_flag = {
@@ -134,11 +164,9 @@ class GPIOMonitor:
                     'none': 'disable'
                 }.get(pin_cfg['pull'], 'disable')
 
-                # Read with bias
                 result = subprocess.run(['gpioget', '--bias=' + bias_flag, 'gpiochip0', str(pin)],
                                         capture_output=True, text=True)
             else:
-                # Read without bias
                 result = subprocess.run(['gpioget', 'gpiochip0', str(pin)],
                                         capture_output=True, text=True)
 
@@ -148,11 +176,11 @@ class GPIOMonitor:
 
     def get_debounce_threshold(self, pin):
         """Get debounce threshold for a pin"""
-        pin_cfg = PIN_CONFIG.get(str(pin), {})
+        pin_cfg = self.pin_config.get(str(pin), {})
         debounce_level = pin_cfg.get('debounce', None)
 
         if debounce_level is None:
-            return None  # No debouncing
+            return None
 
         thresholds = {
             'LOW': 3,
@@ -161,28 +189,35 @@ class GPIOMonitor:
         }
         return thresholds.get(debounce_level, None)
 
+    def get_pin_state(self, pin):
+        """Get current state of a pin"""
+        with self.config_lock:
+            if pin in self.gpio_states:
+                return self.gpio_states[pin]
+            return None
+
     def monitor_loop(self):
         while True:
-            if self.monitored_pins:
-                for pin in self.monitored_pins:
-                    if pin in self.available_pins:
-                        current_reading = self.read_gpio(pin)
+            with self.config_lock:
+                pins_to_monitor = list(self.monitored_pins)
 
-                        # Skip if invalid reading
-                        if current_reading == -1:
-                            continue
+            for pin in pins_to_monitor:
+                if pin in self.available_pins:
+                    current_reading = self.read_gpio(pin)
 
-                        # Check if we have an established state for this pin
+                    if current_reading == -1:
+                        continue
+
+                    with self.config_lock:
                         if pin not in self.gpio_states:
                             continue
 
                         current_state = self.gpio_states[pin]
                         debounce_threshold = self.get_debounce_threshold(pin)
 
-                        # If no debouncing, emit event immediately on change
+                        # Process state change (same logic as before)
                         if debounce_threshold is None:
                             if current_reading != current_state:
-                                # Immediate state change
                                 old_value = current_state
                                 new_value = current_reading
                                 self.gpio_states[pin] = new_value
@@ -199,28 +234,22 @@ class GPIOMonitor:
 
                                 self.broadcast_event(f"gpio_{event_type}", event_data)
                         else:
-                            # Debouncing enabled for this pin
+                            # Debouncing logic (unchanged)
                             if current_reading != current_state:
-                                # Potential state change detected
                                 if pin not in self.gpio_pending_changes:
-                                    # Start tracking this potential change
                                     self.gpio_pending_changes[pin] = {
                                         'readings': [current_reading],
                                         'old_state': current_state,
                                         'new_state': current_reading
                                     }
                                 else:
-                                    # Add to existing pending change readings
                                     pending = self.gpio_pending_changes[pin]
                                     pending['readings'].append(current_reading)
 
-                                    # Check if we have collected 10 readings
                                     if len(pending['readings']) >= 10:
-                                        # Count how many readings match the new state
                                         new_state_count = pending['readings'].count(pending['new_state'])
 
                                         if new_state_count >= debounce_threshold:
-                                            # Confirmed state change
                                             old_value = pending['old_state']
                                             new_value = pending['new_state']
 
@@ -239,22 +268,16 @@ class GPIOMonitor:
 
                                             self.broadcast_event(f"gpio_{event_type}", event_data)
 
-                                        # Clear pending change regardless of outcome
                                         del self.gpio_pending_changes[pin]
                             else:
-                                # Reading matches current state
                                 if pin in self.gpio_pending_changes:
-                                    # We were tracking a potential change
                                     pending = self.gpio_pending_changes[pin]
                                     pending['readings'].append(current_reading)
 
-                                    # Check if we have 10 readings
                                     if len(pending['readings']) >= 10:
-                                        # Count readings for new state
                                         new_state_count = pending['readings'].count(pending['new_state'])
 
                                         if new_state_count >= debounce_threshold:
-                                            # Confirmed state change
                                             old_value = pending['old_state']
                                             new_value = pending['new_state']
 
@@ -273,7 +296,6 @@ class GPIOMonitor:
 
                                             self.broadcast_event(f"gpio_{event_type}", event_data)
 
-                                        # Clear pending change
                                         del self.gpio_pending_changes[pin]
 
             time.sleep(POLL_INTERVAL)
@@ -295,6 +317,13 @@ monitor = GPIOMonitor()
 
 
 class SSEHandler(http.server.BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
     def do_GET(self):
         if self.path == '/':
             self.send_response(200)
@@ -329,6 +358,217 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             except:
                 pass
 
+        elif self.path == '/api/pins':
+            # GET all pins info
+            config = load_config()
+            response = {
+                "monitored": monitor.monitored_pins,
+                "available": monitor.available_pins,
+                "reserved": monitor.reserved_pins,
+                "states": monitor.gpio_states,
+                "config": config.get("pin_config", {})
+            }
+            self.send_json_response(200, response)
+
+        elif self.path.startswith('/api/pins/') and self.path.endswith('/state'):
+            # GET pin state
+            try:
+                pin = int(self.path.split('/')[3])
+                state = monitor.get_pin_state(pin)
+                if state is not None:
+                    self.send_json_response(200, {"pin": pin, "state": state})
+                else:
+                    self.send_json_response(404, {"error": f"Pin {pin} not monitored"})
+            except:
+                self.send_json_response(400, {"error": "Invalid pin number"})
+
+        else:
+            self.send_error(404, "Not Found")
+
+    def do_POST(self):
+        if self.path.startswith('/api/pins/'):
+            # POST to add a pin
+            try:
+                pin = int(self.path.split('/')[3])
+
+                if pin not in monitor.available_pins:
+                    self.send_json_response(400, {"error": f"GPIO {pin} not available"})
+                    return
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin in monitored:
+                    self.send_json_response(409, {"error": f"GPIO {pin} already monitored"})
+                else:
+                    monitored.append(pin)
+                    monitored.sort()
+                    config["monitored_pins"] = monitored
+                    save_config(config)
+
+                    response = {
+                        "message": f"Added GPIO {pin} to monitoring",
+                        "monitored": monitored
+                    }
+
+                    if pin in monitor.reserved_pins:
+                        response["warning"] = f"GPIO {pin} has special function: {monitor.reserved_pins[pin]}"
+
+                    self.send_json_response(200, response)
+            except:
+                self.send_json_response(400, {"error": "Invalid pin number"})
+        else:
+            self.send_error(404, "Not Found")
+
+    def do_PUT(self):
+        if self.path.startswith('/api/pins/') and '/pull' in self.path:
+            # PUT to set pull resistor
+            try:
+                pin = int(self.path.split('/')[3])
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                mode = data.get('mode', '').lower()
+                if mode not in ['up', 'down', 'none']:
+                    self.send_json_response(400, {"error": "Mode must be 'up', 'down', or 'none'"})
+                    return
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin not in monitored:
+                    self.send_json_response(404, {"error": f"GPIO {pin} not monitored"})
+                    return
+
+                pin_config = config.get("pin_config", {})
+                if str(pin) not in pin_config:
+                    pin_config[str(pin)] = {}
+
+                if mode == 'none':
+                    pin_config[str(pin)].pop('pull', None)
+                    message = f"Removed pull resistor for GPIO {pin}"
+                else:
+                    pin_config[str(pin)]['pull'] = mode
+                    message = f"Set GPIO {pin} to pull-{mode}"
+
+                config["pin_config"] = pin_config
+                save_config(config)
+
+                self.send_json_response(200, {"message": message})
+            except:
+                self.send_json_response(400, {"error": "Invalid request"})
+
+        elif self.path.startswith('/api/pins/') and '/debounce' in self.path:
+            # PUT to set debounce
+            try:
+                pin = int(self.path.split('/')[3])
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                level = data.get('level', '').upper()
+                if level not in ['LOW', 'MEDIUM', 'HIGH']:
+                    self.send_json_response(400, {"error": "Level must be 'LOW', 'MEDIUM', or 'HIGH'"})
+                    return
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin not in monitored:
+                    self.send_json_response(404, {"error": f"GPIO {pin} not monitored"})
+                    return
+
+                pin_config = config.get("pin_config", {})
+                if str(pin) not in pin_config:
+                    pin_config[str(pin)] = {}
+
+                pin_config[str(pin)]['debounce'] = level
+
+                thresholds = {'LOW': 3, 'MEDIUM': 5, 'HIGH': 7}
+                message = f"Set GPIO {pin} debouncing to {level} ({thresholds[level]}/10 readings)"
+
+                config["pin_config"] = pin_config
+                save_config(config)
+
+                self.send_json_response(200, {"message": message})
+            except:
+                self.send_json_response(400, {"error": "Invalid request"})
+        else:
+            self.send_error(404, "Not Found")
+
+    def do_DELETE(self):
+        if self.path == '/api/pins':
+            # DELETE all pins
+            config = load_config()
+            config["monitored_pins"] = []
+            save_config(config)
+            self.send_json_response(200, {"message": "Cleared all monitored pins"})
+
+        elif self.path.startswith('/api/pins/') and self.path.endswith('/debounce'):
+            # DELETE debounce setting
+            try:
+                pin = int(self.path.split('/')[3])
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin not in monitored:
+                    self.send_json_response(404, {"error": f"GPIO {pin} not monitored"})
+                    return
+
+                pin_config = config.get("pin_config", {})
+                if str(pin) in pin_config and 'debounce' in pin_config[str(pin)]:
+                    del pin_config[str(pin)]['debounce']
+                    message = f"Removed debouncing from GPIO {pin}"
+                else:
+                    message = f"GPIO {pin} does not have debouncing configured"
+
+                config["pin_config"] = pin_config
+                save_config(config)
+
+                self.send_json_response(200, {"message": message})
+            except:
+                self.send_json_response(400, {"error": "Invalid pin number"})
+
+        elif self.path.startswith('/api/pins/'):
+            # DELETE a pin
+            try:
+                pin = int(self.path.split('/')[3])
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin not in monitored:
+                    self.send_json_response(404, {"error": f"GPIO {pin} not monitored"})
+                else:
+                    monitored.remove(pin)
+                    config["monitored_pins"] = monitored
+
+                    # Remove pin config if exists
+                    pin_config = config.get("pin_config", {})
+                    if str(pin) in pin_config:
+                        del pin_config[str(pin)]
+                        config["pin_config"] = pin_config
+
+                    save_config(config)
+
+                    self.send_json_response(200, {
+                        "message": f"Removed GPIO {pin} from monitoring",
+                        "monitored": monitored
+                    })
+            except:
+                self.send_json_response(400, {"error": "Invalid pin number"})
+        else:
+            self.send_error(404, "Not Found")
+
+    def send_json_response(self, code, data):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
     def get_html_page(self):
         return '''<!DOCTYPE html>
 <html>
@@ -341,18 +581,22 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             color: #0f0;
             padding: 20px;
         }
-        h1 { color: #0f0; }
-        .warning {
-            background: #440;
-            border: 1px solid #ff0;
-            color: #ff0;
-            padding: 10px;
+        h1, h2, h3 { color: #0f0; }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
             margin: 20px 0;
+        }
+        .panel {
+            background: #0a0a0a;
+            border: 1px solid #333;
             border-radius: 5px;
+            padding: 15px;
         }
         .pin-container {
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
             gap: 10px;
             margin: 20px 0;
         }
@@ -374,7 +618,7 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             color: #666;
         }
         #events {
-            max-height: 300px;
+            max-height: 200px;
             overflow-y: auto;
             border: 1px solid #333;
             padding: 10px;
@@ -392,48 +636,204 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             border: 1px solid #0f0;
             margin-bottom: 10px;
         }
-        .info {
-            background: #003;
-            border: 1px solid #00f;
-            color: #88f;
-            padding: 10px;
+        .form-group {
             margin: 10px 0;
-            border-radius: 5px;
         }
-        code {
-            background: #000;
-            padding: 2px 5px;
+        input, select, button {
+            background: #222;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 5px 10px;
+            margin: 2px;
+            border-radius: 3px;
+        }
+        button:hover {
+            background: #333;
+            cursor: pointer;
+        }
+        button:active {
+            background: #0f0;
+            color: #000;
+        }
+        .response {
+            margin-top: 10px;
+            padding: 10px;
+            background: #111;
             border: 1px solid #444;
+            border-radius: 3px;
+            font-size: 12px;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        .response.error {
+            border-color: #f00;
+            color: #f88;
+        }
+        .response.success {
+            border-color: #0f0;
+            color: #8f8;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        input[type="number"] {
+            width: 60px;
         }
     </style>
 </head>
 <body>
-    <h1>GPIO Real-time Monitor</h1>
-    <div class="status">Status: <span id="status">Connecting...</span></div>
-    <div id="no-pins-warning" class="warning" style="display:none">
-        No GPIO pins are being monitored!<br>
-        Configure pins using the command line:<br>
-        <code>sudo gpio-monitor add-pin 17</code><br>
-        <code>sudo gpio-monitor add-pin 27</code><br>
-        <code>sudo gpio-monitor list-pins</code>
+    <h1>GPIO Monitor Console</h1>
+    <div class="status">Connection: <span id="status">Connecting...</span></div>
+
+    <div class="container">
+        <div class="panel">
+            <h3>Pin States</h3>
+            <div id="pins" class="pin-container"></div>
+        </div>
+
+        <div class="panel">
+            <h3>Control Panel</h3>
+
+            <div class="form-group">
+                <strong>Pin Management</strong><br>
+                <input type="number" id="addPin" placeholder="Pin" min="0" max="27">
+                <button onclick="addPin()">Add Pin</button>
+                <button onclick="removePin()">Remove Pin</button>
+                <button onclick="clearAllPins()">Clear All</button>
+            </div>
+
+            <div class="form-group">
+                <strong>Pin State</strong><br>
+                <input type="number" id="statePin" placeholder="Pin" min="0" max="27">
+                <button onclick="getPinState()">Get State</button>
+            </div>
+
+            <div class="form-group">
+                <strong>Pull Resistor</strong><br>
+                <input type="number" id="pullPin" placeholder="Pin" min="0" max="27">
+                <select id="pullMode">
+                    <option value="up">Pull Up</option>
+                    <option value="down">Pull Down</option>
+                    <option value="none">None</option>
+                </select>
+                <button onclick="setPull()">Set Pull</button>
+            </div>
+
+            <div class="form-group">
+                <strong>Debouncing</strong><br>
+                <input type="number" id="debouncePin" placeholder="Pin" min="0" max="27">
+                <select id="debounceLevel">
+                    <option value="LOW">Low (3/10)</option>
+                    <option value="MEDIUM">Medium (5/10)</option>
+                    <option value="HIGH">High (7/10)</option>
+                </select>
+                <button onclick="setDebounce()">Set</button>
+                <button onclick="removeDebounce()">Remove</button>
+            </div>
+
+            <div class="form-group">
+                <button onclick="getAllPins()">Get All Pins Info</button>
+            </div>
+
+            <div id="apiResponse" class="response" style="display:none;"></div>
+        </div>
     </div>
 
-    <div class="info">
-        <strong>Monitored Pins:</strong> <span id="monitored-pins">Loading...</span><br>
-        <strong>Available Pins:</strong> <span id="available-pins">Loading...</span>
+    <div class="panel">
+        <h3>Events Log</h3>
+        <div id="events"></div>
     </div>
-
-    <h2>Pin States:</h2>
-    <div id="pins" class="pin-container"></div>
-
-    <h2>Events Log:</h2>
-    <div id="events"></div>
 
     <script>
         const eventSource = new EventSource('/events');
-        const pinStates = {};
         let eventCount = 0;
         let monitoredPins = [];
+
+        function showResponse(data, isError = false) {
+            const resp = document.getElementById('apiResponse');
+            resp.className = 'response ' + (isError ? 'error' : 'success');
+            resp.textContent = JSON.stringify(data, null, 2);
+            resp.style.display = 'block';
+            setTimeout(() => {
+                resp.style.display = 'none';
+            }, 5000);
+        }
+
+        async function apiCall(method, endpoint, body = null) {
+            try {
+                const options = {
+                    method: method,
+                    headers: body ? {'Content-Type': 'application/json'} : {}
+                };
+                if (body) options.body = JSON.stringify(body);
+
+                const response = await fetch(endpoint, options);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    showResponse(data, true);
+                    return null;
+                }
+
+                showResponse(data);
+                return data;
+            } catch (error) {
+                showResponse({error: error.message}, true);
+                return null;
+            }
+        }
+
+        async function addPin() {
+            const pin = document.getElementById('addPin').value;
+            if (!pin) return;
+            await apiCall('POST', `/api/pins/${pin}`);
+            document.getElementById('addPin').value = '';
+        }
+
+        async function removePin() {
+            const pin = document.getElementById('addPin').value;
+            if (!pin) return;
+            await apiCall('DELETE', `/api/pins/${pin}`);
+            document.getElementById('addPin').value = '';
+        }
+
+        async function clearAllPins() {
+            if (confirm('Clear all monitored pins?')) {
+                await apiCall('DELETE', '/api/pins');
+            }
+        }
+
+        async function getPinState() {
+            const pin = document.getElementById('statePin').value;
+            if (!pin) return;
+            await apiCall('GET', `/api/pins/${pin}/state`);
+        }
+
+        async function setPull() {
+            const pin = document.getElementById('pullPin').value;
+            const mode = document.getElementById('pullMode').value;
+            if (!pin) return;
+            await apiCall('PUT', `/api/pins/${pin}/pull`, {mode: mode});
+        }
+
+        async function setDebounce() {
+            const pin = document.getElementById('debouncePin').value;
+            const level = document.getElementById('debounceLevel').value;
+            if (!pin) return;
+            await apiCall('PUT', `/api/pins/${pin}/debounce`, {level: level});
+        }
+
+        async function removeDebounce() {
+            const pin = document.getElementById('debouncePin').value;
+            if (!pin) return;
+            await apiCall('DELETE', `/api/pins/${pin}/debounce`);
+        }
+
+        async function getAllPins() {
+            await apiCall('GET', '/api/pins');
+        }
 
         eventSource.onopen = () => {
             document.getElementById('status').textContent = 'Connected';
@@ -443,16 +843,10 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             const data = JSON.parse(e.data);
             monitoredPins = data.monitored || [];
 
-            document.getElementById('monitored-pins').textContent = 
-                monitoredPins.length > 0 ? monitoredPins.join(', ') : 'None';
-            document.getElementById('available-pins').textContent = 
-                data.available ? data.available.join(', ') : 'Unknown';
-
+            document.getElementById('pins').innerHTML = '';
             if (monitoredPins.length === 0) {
-                document.getElementById('no-pins-warning').style.display = 'block';
                 document.getElementById('pins').innerHTML = '<div style="color: #666;">No pins configured</div>';
             } else {
-                document.getElementById('no-pins-warning').style.display = 'none';
                 for (const [pin, state] of Object.entries(data.pins)) {
                     updatePin(pin, state);
                 }
@@ -486,13 +880,17 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             const eventDiv = document.createElement('div');
             eventDiv.className = 'event ' + type.replace('gpio_', '');
 
-            const arrow = data.state == 1 ? 'UP' : 'DOWN';
-            eventDiv.textContent = '#' + eventCount + ' [' + data.time + '] GPIO' + data.pin + ': ' + data.previous + ' to ' + data.state + ' ' + arrow;
+            const arrow = data.state == 1 ? '↑' : '↓';
+            let text = '#' + eventCount + ' [' + data.time + '] GPIO' + data.pin + ' ' + arrow;
+            if (data.confidence) {
+                text += ' (' + data.confidence + ')';
+            }
+            eventDiv.textContent = text;
 
             const container = document.getElementById('events');
             container.insertBefore(eventDiv, container.firstChild);
 
-            while (container.children.length > 50) {
+            while (container.children.length > 30) {
                 container.removeChild(container.lastChild);
             }
         }
@@ -509,15 +907,13 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    config = load_config()
+    PORT = config.get("port", DEFAULT_PORT)
+
     monitor_thread = threading.Thread(target=monitor.monitor_loop, daemon=True)
     monitor_thread.start()
 
-    with socketserver.TCPServer(("", PORT), SSEHandler) as httpd:
+    with socketserver.ThreadingTCPServer(("", PORT), SSEHandler) as httpd:
         print(f"GPIO Monitor started on port {PORT}")
-        print(f"Open: http://localhost:{PORT}")
-        print(f"SSE Endpoint: http://localhost:{PORT}/events")
-        if MONITORED_PINS:
-            print(f"Monitoring pins: {MONITORED_PINS}")
-        else:
-            print("No pins configured. Use 'gpio-monitor add-pin <number>' to add pins")
+        print(f"Web interface: http://localhost:{PORT}")
         httpd.serve_forever()
