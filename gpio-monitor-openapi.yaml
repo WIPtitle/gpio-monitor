@@ -2,7 +2,7 @@ openapi: 3.0.0
 info:
   title: GPIO Monitor REST API
   description: Real-time GPIO monitoring service with SSE support and dynamic configuration
-  version: 2.0.0
+  version: 2.1.0
   contact:
     name: Matteo Galvagni
     email: galvagni.matteo@protonmail.com
@@ -77,13 +77,21 @@ paths:
                         pull:
                           type: string
                           enum: [up, down, none]
-                        debounce:
-                          type: string
-                          enum: [LOW, MEDIUM, HIGH]
+                        debounce_low:
+                          type: integer
+                          minimum: 1
+                          maximum: 10
+                          description: Threshold for HIGH to LOW transition
+                        debounce_high:
+                          type: integer
+                          minimum: 1
+                          maximum: 10
+                          description: Threshold for LOW to HIGH transition
                     example:
                       '17':
                         pull: down
-                        debounce: HIGH
+                        debounce_low: 6
+                        debounce_high: 8
 
     delete:
       tags:
@@ -343,12 +351,15 @@ paths:
     put:
       tags:
         - Configuration
-      summary: Set debounce level
+      summary: Set asymmetric debounce thresholds
       description: |
-        Configures debouncing for a GPIO pin to filter noise and false triggers.
-        - LOW: 3/10 readings required (300ms delay)
-        - MEDIUM: 5/10 readings required (500ms delay)
-        - HIGH: 7/10 readings required (700ms delay)
+        Configures asymmetric debouncing for a GPIO pin to filter noise and false triggers.
+        Requires both LOW and HIGH threshold values.
+        
+        - LOW threshold: Applied for HIGH→LOW transitions
+        - HIGH threshold: Applied for LOW→HIGH transitions
+        - Values from 1-10 (1=minimal filtering, 10=maximum filtering)
+        - Each reading cycle takes ~1 second (10 readings at 0.1s intervals)
       operationId: setDebounce
       parameters:
         - name: pin
@@ -366,25 +377,40 @@ paths:
             schema:
               type: object
               required:
-                - level
+                - low
+                - high
               properties:
-                level:
-                  type: string
-                  enum: [LOW, MEDIUM, HIGH]
-                  description: Debounce level
+                low:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  description: Threshold for HIGH→LOW transition (1-10 readings out of 10)
+                high:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  description: Threshold for LOW→HIGH transition (1-10 readings out of 10)
             examples:
-              low:
-                summary: Low debouncing (fast response)
+              symmetric:
+                summary: Symmetric filtering (same for both transitions)
                 value:
-                  level: LOW
-              medium:
-                summary: Medium debouncing (balanced)
+                  low: 5
+                  high: 5
+              asymmetricFastRising:
+                summary: Fast rising edge, slow falling edge
                 value:
-                  level: MEDIUM
-              high:
-                summary: High debouncing (maximum filtering)
+                  low: 7
+                  high: 3
+              asymmetricFastFalling:
+                summary: Fast falling edge, slow rising edge
                 value:
-                  level: HIGH
+                  low: 3
+                  high: 7
+              maximum:
+                summary: Maximum filtering for both transitions
+                value:
+                  low: 10
+                  high: 10
       responses:
         '200':
           description: Debounce configured
@@ -395,9 +421,9 @@ paths:
                 properties:
                   message:
                     type: string
-                    example: 'Set GPIO 17 debouncing to HIGH (7/10 readings)'
+                    example: 'Set GPIO 17 debouncing: LOW=6/10, HIGH=8/10'
         '400':
-          description: Invalid request or level
+          description: Invalid request or threshold values
           content:
             application/json:
               schema:
@@ -405,7 +431,9 @@ paths:
                 properties:
                   error:
                     type: string
-                    example: "Level must be 'LOW', 'MEDIUM', or 'HIGH'"
+                    examples:
+                      - "Both 'low' and 'high' must be integers"
+                      - "Thresholds must be between 1 and 10"
         '404':
           description: Pin not monitored
           content:
@@ -464,6 +492,83 @@ paths:
                     type: string
                     example: 'GPIO 17 not monitored'
 
+  /api/pins/{pin}/inverted:
+    put:
+      tags:
+        - Configuration
+      summary: Set inverted logic
+      description: |
+        Configures inverted logic for a GPIO pin. When enabled, the pin will 
+        display HIGH when physically LOW and vice versa. This only affects 
+        the displayed state, not the actual internal state.
+      operationId: setInverted
+      parameters:
+        - name: pin
+          in: path
+          required: true
+          description: GPIO pin number
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 27
+      responses:
+        '200':
+          description: Inverted logic configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: 'Set GPIO 17 to inverted logic'
+        '404':
+          description: Pin not monitored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: 'GPIO 17 not monitored'
+
+    delete:
+      tags:
+        - Configuration
+      summary: Remove inverted logic
+      description: Removes inverted logic from a GPIO pin, returning to normal display
+      operationId: removeInverted
+      parameters:
+        - name: pin
+          in: path
+          required: true
+          description: GPIO pin number
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 27
+      responses:
+        '200':
+          description: Inverted logic removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: 'Removed inverted logic from GPIO 17'
+        '404':
+          description: Pin not monitored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: 'GPIO 17 not monitored'
   /events:
     get:
       tags:
@@ -476,6 +581,8 @@ paths:
         - `init`: Initial state of all monitored pins
         - `gpio_rising`: Pin changed from LOW to HIGH
         - `gpio_falling`: Pin changed from HIGH to LOW
+        
+        Events include confidence level when debouncing is enabled.
         
         This is an SSE endpoint, not a regular REST endpoint.
       operationId: eventStream
@@ -491,10 +598,10 @@ paths:
                   data: {"pins": {"17": 0, "27": 1}, "monitored": [17, 27], "available": [2, 3, ...], "timestamp": 1699123456789}
                   
                   event: gpio_rising
-                  data: {"pin": 17, "state": 1, "previous": 0, "timestamp": 1699123456789, "time": "14:23:45.123"}
+                  data: {"pin": 17, "state": 1, "previous": 0, "timestamp": 1699123456789, "time": "14:23:45.123", "confidence": "8/10"}
                   
                   event: gpio_falling
-                  data: {"pin": 17, "state": 0, "previous": 1, "timestamp": 1699123456789, "time": "14:23:45.123"}
+                  data: {"pin": 17, "state": 0, "previous": 1, "timestamp": 1699123456789, "time": "14:23:45.123", "confidence": "6/10"}
 
   /:
     get:

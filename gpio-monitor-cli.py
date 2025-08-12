@@ -118,17 +118,96 @@ def remove_pin(pin):
         sys.exit(1)
 
 
-def set_debounce(pin, level):
-    """Set debounce level for a GPIO pin"""
+def set_inverted(pin):
+    """Set inverted logic for a GPIO pin"""
     try:
         pin = int(pin)
-        level = level.upper()
 
-        if level not in ['LOW', 'MEDIUM', 'HIGH']:
-            print("Error: Level must be 'LOW', 'MEDIUM', or 'HIGH'")
-            print("  LOW    = 3/10 readings needed (fast, less filtering)")
-            print("  MEDIUM = 5/10 readings needed (balanced)")
-            print("  HIGH   = 7/10 readings needed (slow, more filtering)")
+        config = load_config()
+        monitored = config.get("monitored_pins", [])
+
+        if pin not in monitored:
+            print(f"Error: GPIO {pin} is not being monitored")
+            print(f"Add it first with: gpio-monitor add-pin {pin}")
+            sys.exit(1)
+
+        pin_config = config.get("pin_config", {})
+        if str(pin) not in pin_config:
+            pin_config[str(pin)] = {}
+
+        pin_config[str(pin)]['inverted'] = True
+
+        print(f"Set GPIO {pin} to inverted logic")
+        print("Pin will now show HIGH when physically LOW and vice versa")
+
+        config["pin_config"] = pin_config
+        save_config(config)
+
+    except ValueError:
+        print("Error: Invalid pin number")
+        sys.exit(1)
+
+
+def remove_inverted(pin):
+    """Remove inverted logic for a GPIO pin"""
+    try:
+        pin = int(pin)
+
+        config = load_config()
+        monitored = config.get("monitored_pins", [])
+
+        if pin not in monitored:
+            print(f"Error: GPIO {pin} is not being monitored")
+            sys.exit(1)
+
+        pin_config = config.get("pin_config", {})
+        if str(pin) in pin_config and 'inverted' in pin_config[str(pin)]:
+            del pin_config[str(pin)]['inverted']
+            print(f"Removed inverted logic from GPIO {pin}")
+            print("Pin will now show actual physical state")
+        else:
+            print(f"GPIO {pin} does not have inverted logic configured")
+
+        config["pin_config"] = pin_config
+        save_config(config)
+
+    except ValueError:
+        print("Error: Invalid pin number")
+        sys.exit(1)
+
+
+def set_debounce(args):
+    """Set debounce thresholds for a GPIO pin
+
+    Expected format: <pin> LOW <low_value> HIGH <high_value>
+    """
+    if len(args) != 5:
+        print("Error: Invalid format")
+        print("Usage: gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
+        print("Example: gpio-monitor set-debounce 17 LOW 6 HIGH 8")
+        sys.exit(1)
+
+    try:
+        pin = int(args[0])
+
+        # Parse LOW and HIGH values
+        low_idx = args.index('LOW') if 'LOW' in args else -1
+        high_idx = args.index('HIGH') if 'HIGH' in args else -1
+
+        if low_idx == -1 or high_idx == -1:
+            print("Error: Must specify both LOW and HIGH thresholds")
+            print("Usage: gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
+            sys.exit(1)
+
+        low_value = int(args[low_idx + 1])
+        high_value = int(args[high_idx + 1])
+
+        # Validate values
+        if not (1 <= low_value <= 10) or not (1 <= high_value <= 10):
+            print("Error: Threshold values must be between 1 and 10")
+            print("  1  = minimum filtering (fastest response)")
+            print("  5  = balanced filtering")
+            print("  10 = maximum filtering (most stable)")
             sys.exit(1)
 
         config = load_config()
@@ -143,17 +222,23 @@ def set_debounce(pin, level):
         if str(pin) not in pin_config:
             pin_config[str(pin)] = {}
 
-        pin_config[str(pin)]['debounce'] = level
+        pin_config[str(pin)]['debounce_low'] = low_value
+        pin_config[str(pin)]['debounce_high'] = high_value
 
-        thresholds = {'LOW': 3, 'MEDIUM': 5, 'HIGH': 7}
-        print(f"Set GPIO {pin} debouncing to {level} ({thresholds[level]}/10 readings required)")
+        print(f"Set GPIO {pin} debouncing:")
+        print(f"  HIGH→LOW transition: {low_value}/10 readings required")
+        print(f"  LOW→HIGH transition: {high_value}/10 readings required")
         print("Events will be delayed by ~1 second for stability")
 
         config["pin_config"] = pin_config
         save_config(config)
 
-    except ValueError:
-        print("Error: Invalid pin number")
+    except ValueError as e:
+        print(f"Error: Invalid value - {e}")
+        print("Usage: gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
         sys.exit(1)
 
 
@@ -170,8 +255,17 @@ def remove_debounce(pin):
             sys.exit(1)
 
         pin_config = config.get("pin_config", {})
-        if str(pin) in pin_config and 'debounce' in pin_config[str(pin)]:
-            del pin_config[str(pin)]['debounce']
+        removed = False
+
+        if str(pin) in pin_config:
+            if 'debounce_low' in pin_config[str(pin)]:
+                del pin_config[str(pin)]['debounce_low']
+                removed = True
+            if 'debounce_high' in pin_config[str(pin)]:
+                del pin_config[str(pin)]['debounce_high']
+                removed = True
+
+        if removed:
             print(f"Removed debouncing from GPIO {pin}")
             print("Events will now be emitted immediately on state change")
         else:
@@ -205,10 +299,8 @@ def list_pins():
                 cfg = pin_config[str(pin)]
                 if 'pull' in cfg:
                     configs.append(f"pull-{cfg['pull']}")
-                if 'debounce' in cfg:
-                    thresholds = {'LOW': 3, 'MEDIUM': 5, 'HIGH': 7}
-                    thresh = thresholds.get(cfg['debounce'], '?')
-                    configs.append(f"debounce-{cfg['debounce']}({thresh}/10)")
+                if 'debounce_low' in cfg and 'debounce_high' in cfg:
+                    configs.append(f"debounce(L:{cfg['debounce_low']}/10, H:{cfg['debounce_high']}/10)")
 
             config_str = ", ".join(configs) if configs else "no special config"
             print(f"  GPIO {pin:2d}: {config_str}")
@@ -338,8 +430,11 @@ def show_help():
     print("")
     print("Pin Configuration:")
     print("  gpio-monitor set-pull <pin> <mode>   Set pull resistor (up/down/none)")
-    print("  gpio-monitor set-debounce <pin> <level>  Set debouncing (LOW/MEDIUM/HIGH)")
+    print("  gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
+    print("                                        Set asymmetric debouncing thresholds")
     print("  gpio-monitor remove-debounce <pin>   Remove debouncing")
+    print("  gpio-monitor set-inverted <pin>      Set inverted logic (HIGH ↔ LOW)")
+    print("  gpio-monitor remove-inverted <pin>   Remove inverted logic")
     print("")
     print("Service Control:")
     print("  gpio-monitor status                  Show current configuration and status")
@@ -352,10 +447,17 @@ def show_help():
     print("REST API:")
     print("  OpenAPI schema: /usr/share/doc/gpio-monitor/gpio-monitor-openapi.yaml")
     print("")
-    print("Debounce Levels:")
-    print("  LOW    = 3/10 readings (less filtering)")
-    print("  MEDIUM = 5/10 readings (balanced)")
-    print("  HIGH   = 7/10 readings (more filtering)")
+    print("Debounce thresholds (1-10):")
+    print("  LOW threshold:  Applied for HIGH → LOW transitions")
+    print("  HIGH threshold: Applied for LOW → HIGH transitions")
+    print("  1  = one read of value for status change ")
+    print("  5  = five reads of value for status change")
+    print("  10 = ten reads of value for status change")
+    print("")
+    print("Example:")
+    print("  gpio-monitor set-debounce 17 LOW 6 HIGH 8")
+    print("  → Requires 6/10 readings of LOW for HIGH → LOW transition")
+    print("  → Requires 8/10 readings of HIGH for LOW → HIGH transition")
 
 
 def main():
@@ -373,10 +475,15 @@ def main():
         remove_pin(sys.argv[2])
     elif command == "set-pull" and len(sys.argv) == 4:
         set_pull(sys.argv[2], sys.argv[3])
-    elif command == "set-debounce" and len(sys.argv) == 4:
-        set_debounce(sys.argv[2], sys.argv[3])
+    elif command == "set-debounce" and len(sys.argv) >= 7:
+        # Pass all arguments after 'set-debounce' and pin number
+        set_debounce(sys.argv[2:])
     elif command == "remove-debounce" and len(sys.argv) == 3:
         remove_debounce(sys.argv[2])
+    elif command == "set-inverted" and len(sys.argv) == 3:
+        set_inverted(sys.argv[2])
+    elif command == "remove-inverted" and len(sys.argv) == 3:
+        remove_inverted(sys.argv[2])
     elif command == "list-pins":
         list_pins()
     elif command == "clear-pins":

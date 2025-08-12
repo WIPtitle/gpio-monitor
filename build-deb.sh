@@ -49,15 +49,9 @@ systemctl enable gpio-monitor.service
 systemctl start gpio-monitor.service
 
 echo ""
-echo "GPIO Monitor v2.0 installed successfully!"
+echo "GPIO Monitor installed successfully!"
 echo ""
 echo "COMMANDS:"
-echo "  gpio-monitor add-pin <pin>      - Add GPIO pin to monitoring"
-echo "  gpio-monitor remove-pin <pin>   - Remove GPIO pin"
-echo "  gpio-monitor list-pins          - List all pins"
-echo "  gpio-monitor set-pull <pin> <mode>     - Set pull resistor (up/down/none)"
-echo "  gpio-monitor set-debounce <pin> <level> - Set debouncing (LOW/MEDIUM/HIGH)"
-echo "  gpio-monitor status             - Show current status"
 echo "  gpio-monitor help               - Show all commands"
 echo ""
 echo "ACCESS:"
@@ -134,9 +128,6 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "To uninstall:"
     echo "  sudo dpkg -r ${PACKAGE_NAME}"
-    echo ""
-    echo "To completely remove (including config):"
-    echo "  sudo dpkg --purge ${PACKAGE_NAME}"
 else
     echo "Error: Package build failed"
     exit 1

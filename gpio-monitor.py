@@ -103,7 +103,7 @@ class GPIOMonitor:
         pin_cfg = self.pin_config.get(str(pin), {})
 
         # Check if debouncing is enabled for this pin
-        if 'debounce' in pin_cfg:
+        if 'debounce_low' in pin_cfg or 'debounce_high' in pin_cfg:
             # Need 10 initial readings for debounced pins
             readings = []
             for _ in range(10):
@@ -164,26 +164,36 @@ class GPIOMonitor:
         except:
             return -1
 
-    def get_debounce_threshold(self, pin):
-        """Get debounce threshold for a pin"""
+    def get_debounce_threshold(self, pin, target_state):
+        """Get debounce threshold for a pin based on target state
+
+        Args:
+            pin: GPIO pin number
+            target_state: The state we're transitioning TO (0 for LOW, 1 for HIGH)
+
+        Returns:
+            Threshold value (1-10) or None if no debouncing
+        """
         pin_cfg = self.pin_config.get(str(pin), {})
-        debounce_level = pin_cfg.get('debounce', None)
 
-        if debounce_level is None:
-            return None
+        if target_state == 0:  # Transitioning to LOW (from HIGH)
+            return pin_cfg.get('debounce_low', None)
+        else:  # Transitioning to HIGH (from LOW)
+            return pin_cfg.get('debounce_high', None)
 
-        thresholds = {
-            'LOW': 3,
-            'MEDIUM': 5,
-            'HIGH': 7
-        }
-        return thresholds.get(debounce_level, None)
-
-    def get_pin_state(self, pin):
-        """Get current state of a pin"""
+    def get_pin_state(self, pin, apply_inversion=True):
+        """Get current state of a pin with optional inversion"""
         with self.config_lock:
             if pin in self.gpio_states:
-                return self.gpio_states[pin]
+                state = self.gpio_states[pin]
+
+                # Apply inversion if configured and requested
+                if apply_inversion:
+                    pin_cfg = self.pin_config.get(str(pin), {})
+                    if pin_cfg.get('inverted', False):
+                        state = 1 - state  # Invert: 0→1, 1→0
+
+                return state
             return None
 
     def monitor_loop(self):
@@ -203,28 +213,31 @@ class GPIOMonitor:
                             continue
 
                         current_state = self.gpio_states[pin]
-                        debounce_threshold = self.get_debounce_threshold(pin)
+
+                        # Get appropriate debounce threshold based on the target state
+                        debounce_threshold = self.get_debounce_threshold(pin, current_reading)
 
                         # Process state change
                         if debounce_threshold is None:
                             if current_reading != current_state:
-                                old_value = current_state
-                                new_value = current_reading
-                                self.gpio_states[pin] = new_value
-
-                                event_type = "rising" if new_value == 1 else "falling"
+                                display_old = old_value
+                                display_new = new_value
+                                pin_cfg = self.pin_config.get(str(pin), {})
+                                if pin_cfg.get('inverted', False):
+                                    display_old = 1 - old_value
+                                    display_new = 1 - new_value
 
                                 event_data = {
                                     "pin": pin,
-                                    "state": new_value,
-                                    "previous": old_value,
+                                    "state": display_new,
+                                    "previous": display_old,
                                     "timestamp": int(time.time() * 1000),
                                     "time": datetime.now().strftime("%H:%M:%S.%f")[:-3]
                                 }
 
                                 self.broadcast_event(f"gpio_{event_type}", event_data)
                         else:
-                            # Debouncing logic
+                            # Debouncing logic with asymmetric thresholds
                             if current_reading != current_state:
                                 if pin not in self.gpio_pending_changes:
                                     self.gpio_pending_changes[pin] = {
@@ -267,7 +280,10 @@ class GPIOMonitor:
                                     if len(pending['readings']) >= 10:
                                         new_state_count = pending['readings'].count(pending['new_state'])
 
-                                        if new_state_count >= debounce_threshold:
+                                        # Use the appropriate threshold for the target state
+                                        target_threshold = self.get_debounce_threshold(pin, pending['new_state'])
+
+                                        if new_state_count >= target_threshold:
                                             old_value = pending['old_state']
                                             new_value = pending['new_state']
 
@@ -331,12 +347,21 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
 
             monitor.clients.append(self.wfile)
 
+            displayed_states = {}
+            for pin, state in monitor.gpio_states.items():
+                pin_cfg = monitor.pin_config.get(str(pin), {})
+                if pin_cfg.get('inverted', False):
+                    displayed_states[pin] = 1 - state
+                else:
+                    displayed_states[pin] = state
+
             init_data = {
-                "pins": monitor.gpio_states,
+                "pins": displayed_states,
                 "monitored": monitor.monitored_pins,
                 "available": monitor.available_pins,
                 "timestamp": int(time.time() * 1000)
             }
+
             self.wfile.write(f"event: init\ndata: {json.dumps(init_data)}\n\n".encode())
             self.wfile.flush()
 
@@ -463,9 +488,16 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                 post_data = self.rfile.read(content_length)
                 data = json.loads(post_data)
 
-                level = data.get('level', '').upper()
-                if level not in ['LOW', 'MEDIUM', 'HIGH']:
-                    self.send_json_response(400, {"error": "Level must be 'LOW', 'MEDIUM', or 'HIGH'"})
+                low_threshold = data.get('low')
+                high_threshold = data.get('high')
+
+                # Validate thresholds
+                if not isinstance(low_threshold, int) or not isinstance(high_threshold, int):
+                    self.send_json_response(400, {"error": "Both 'low' and 'high' must be integers"})
+                    return
+
+                if not (1 <= low_threshold <= 10) or not (1 <= high_threshold <= 10):
+                    self.send_json_response(400, {"error": "Thresholds must be between 1 and 10"})
                     return
 
                 config = load_config()
@@ -479,10 +511,38 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                 if str(pin) not in pin_config:
                     pin_config[str(pin)] = {}
 
-                pin_config[str(pin)]['debounce'] = level
+                pin_config[str(pin)]['debounce_low'] = low_threshold
+                pin_config[str(pin)]['debounce_high'] = high_threshold
 
-                thresholds = {'LOW': 3, 'MEDIUM': 5, 'HIGH': 7}
-                message = f"Set GPIO {pin} debouncing to {level} ({thresholds[level]}/10 readings)"
+                message = f"Set GPIO {pin} debouncing: LOW={low_threshold}/10, HIGH={high_threshold}/10"
+
+                config["pin_config"] = pin_config
+                save_config(config)
+
+                # Reload monitor config immediately
+                monitor.reload_config()
+
+                self.send_json_response(200, {"message": message})
+            except:
+                self.send_json_response(400, {"error": "Invalid request"})
+        elif self.path.startswith('/api/pins/') and '/inverted' in self.path:
+            # PUT to set inverted logic
+            try:
+                pin = int(self.path.split('/')[3])
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin not in monitored:
+                    self.send_json_response(404, {"error": f"GPIO {pin} not monitored"})
+                    return
+
+                pin_config = config.get("pin_config", {})
+                if str(pin) not in pin_config:
+                    pin_config[str(pin)] = {}
+
+                pin_config[str(pin)]['inverted'] = True
+                message = f"Set GPIO {pin} to inverted logic"
 
                 config["pin_config"] = pin_config
                 save_config(config)
@@ -521,11 +581,50 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 pin_config = config.get("pin_config", {})
-                if str(pin) in pin_config and 'debounce' in pin_config[str(pin)]:
-                    del pin_config[str(pin)]['debounce']
-                    message = f"Removed debouncing from GPIO {pin}"
+                if str(pin) in pin_config:
+                    removed = False
+                    if 'debounce_low' in pin_config[str(pin)]:
+                        del pin_config[str(pin)]['debounce_low']
+                        removed = True
+                    if 'debounce_high' in pin_config[str(pin)]:
+                        del pin_config[str(pin)]['debounce_high']
+                        removed = True
+
+                    if removed:
+                        message = f"Removed debouncing from GPIO {pin}"
+                    else:
+                        message = f"GPIO {pin} does not have debouncing configured"
                 else:
                     message = f"GPIO {pin} does not have debouncing configured"
+
+                config["pin_config"] = pin_config
+                save_config(config)
+
+                # Reload monitor config immediately
+                monitor.reload_config()
+
+                self.send_json_response(200, {"message": message})
+            except:
+                self.send_json_response(400, {"error": "Invalid pin number"})
+
+        elif self.path.startswith('/api/pins/') and self.path.endswith('/inverted'):
+            # DELETE inverted logic setting
+            try:
+                pin = int(self.path.split('/')[3])
+
+                config = load_config()
+                monitored = config.get("monitored_pins", [])
+
+                if pin not in monitored:
+                    self.send_json_response(404, {"error": f"GPIO {pin} not monitored"})
+                    return
+
+                pin_config = config.get("pin_config", {})
+                if str(pin) in pin_config and 'inverted' in pin_config[str(pin)]:
+                    del pin_config[str(pin)]['inverted']
+                    message = f"Removed inverted logic from GPIO {pin}"
+                else:
+                    message = f"GPIO {pin} does not have inverted logic configured"
 
                 config["pin_config"] = pin_config
                 save_config(config)

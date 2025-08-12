@@ -109,6 +109,17 @@
         input[type="number"] {
             width: 60px;
         }
+        .debounce-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        .debounce-label {
+            color: #888;
+            font-size: 12px;
+            margin: 0 5px;
+        }
     </style>
 </head>
 <body>
@@ -150,15 +161,31 @@
             </div>
 
             <div class="form-group">
-                <strong>Debouncing</strong><br>
-                <input type="number" id="debouncePin" placeholder="Pin" min="0" max="27">
-                <select id="debounceLevel">
-                    <option value="LOW">Low (3/10)</option>
-                    <option value="MEDIUM">Medium (5/10)</option>
-                    <option value="HIGH">High (7/10)</option>
-                </select>
-                <button onclick="setDebounce()">Set</button>
+                <strong>Inverted Logic</strong><br>
+                <input type="number" id="invertedPin" placeholder="Pin" min="0" max="27">
+                <button onclick="setInverted()">Set Inverted</button>
+                <button onclick="removeInverted()">Remove</button>
+                <div style="font-size: 11px; color: #666; margin-top: 5px;">
+                    Shows HIGH when physically LOW and vice versa
+                </div>
+            </div>
+
+            <div class="form-group">
+                <strong>Asymmetric Debouncing</strong><br>
+                <div class="debounce-group">
+                    <input type="number" id="debouncePin" placeholder="Pin" min="0" max="27">
+                    <span class="debounce-label">LOW:</span>
+                    <input type="number" id="debounceLow" placeholder="1-10" min="1" max="10" value="5">
+                    <span class="debounce-label">HIGH:</span>
+                    <input type="number" id="debounceHigh" placeholder="1-10" min="1" max="10" value="5">
+                </div>
+                <button onclick="setDebounce()">Set Debounce</button>
                 <button onclick="removeDebounce()">Remove</button>
+                <div style="font-size: 11px; color: #666; margin-top: 5px;">
+                    LOW: threshold for HIGH to LOW transition<br>
+                    HIGH: threshold for LOW to HIGH transition<br>
+                    (Out of 10 reads, one read every tenth of a second, <1-10> values accepted only)
+                </div>
             </div>
 
             <div class="form-group">
@@ -284,9 +311,47 @@
 
         async function setDebounce() {
             const pin = document.getElementById('debouncePin').value;
-            const level = document.getElementById('debounceLevel').value;
+            const lowValue = parseInt(document.getElementById('debounceLow').value);
+            const highValue = parseInt(document.getElementById('debounceHigh').value);
+
+            if (!pin) {
+                showResponse({error: 'Please enter a pin number'}, true);
+                return;
+            }
+
+            if (isNaN(lowValue) || lowValue < 1 || lowValue > 10) {
+                showResponse({error: 'LOW threshold must be between 1 and 10'}, true);
+                return;
+            }
+
+            if (isNaN(highValue) || highValue < 1 || highValue > 10) {
+                showResponse({error: 'HIGH threshold must be between 1 and 10'}, true);
+                return;
+            }
+
+            const result = await apiCall('PUT', `/api/pins/${pin}/debounce`, {
+                low: lowValue,
+                high: highValue
+            });
+
+            if (result) {
+                await refreshPinView();
+            }
+        }
+
+        async function setInverted() {
+            const pin = document.getElementById('invertedPin').value;
             if (!pin) return;
-            const result = await apiCall('PUT', `/api/pins/${pin}/debounce`, {level: level});
+            const result = await apiCall('PUT', `/api/pins/${pin}/inverted`);
+            if (result) {
+                await refreshPinView();
+            }
+        }
+
+        async function removeInverted() {
+            const pin = document.getElementById('invertedPin').value;
+            if (!pin) return;
+            const result = await apiCall('DELETE', `/api/pins/${pin}/inverted`);
             if (result) {
                 await refreshPinView();
             }
