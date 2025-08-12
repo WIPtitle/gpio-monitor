@@ -220,12 +220,18 @@ class GPIOMonitor:
                         # Process state change
                         if debounce_threshold is None:
                             if current_reading != current_state:
+                                old_value = current_state
+                                new_value = current_reading
+                                self.gpio_states[pin] = new_value
+
                                 display_old = old_value
                                 display_new = new_value
                                 pin_cfg = self.pin_config.get(str(pin), {})
                                 if pin_cfg.get('inverted', False):
                                     display_old = 1 - old_value
                                     display_new = 1 - new_value
+
+                                event_type = "rising" if new_value == 1 else "falling"
 
                                 event_data = {
                                     "pin": pin,

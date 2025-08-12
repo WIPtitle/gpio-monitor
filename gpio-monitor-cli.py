@@ -433,7 +433,7 @@ def show_help():
     print("  gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
     print("                                        Set asymmetric debouncing thresholds")
     print("  gpio-monitor remove-debounce <pin>   Remove debouncing")
-    print("  gpio-monitor set-inverted <pin>      Set inverted logic (HIGH ↔ LOW)")
+    print("  gpio-monitor set-inverted <pin>      Set inverted logic when reading state (HIGH ↔ LOW) (doesn't change internal state")
     print("  gpio-monitor remove-inverted <pin>   Remove inverted logic")
     print("")
     print("Service Control:")

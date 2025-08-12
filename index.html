@@ -1,6 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GPIO Monitor</title>
     <style>
         body {
@@ -216,7 +218,7 @@
             }, 5000);
         }
 
-        async function refreshPinView() {
+        async function refreshPinView(forceRefresh = false) {
             try {
                 const response = await fetch('/api/pins');
                 const data = await response.json();
@@ -227,11 +229,26 @@
                 if (monitoredPins.length === 0) {
                     document.getElementById('pins').innerHTML = '<div style="color: #666;">No pins configured</div>';
                 } else {
-                    for (const pin of monitoredPins) {
-                        if (data.states && data.states[pin] !== undefined) {
-                            updatePin(pin, data.states[pin]);
-                        } else {
-                            updatePin(pin, 0);
+                    // If forceRefresh is true, get the actual state of each pin
+                    if (forceRefresh) {
+                        for (const pin of monitoredPins) {
+                            try {
+                                const stateResponse = await fetch(`/api/pins/${pin}/state`);
+                                const stateData = await stateResponse.json();
+                                updatePin(pin, stateData.state || 0);
+                            } catch (error) {
+                                console.error(`Error getting state for pin ${pin}:`, error);
+                                updatePin(pin, 0);
+                            }
+                        }
+                    } else {
+                        // Use cached states from the general pins endpoint
+                        for (const pin of monitoredPins) {
+                            if (data.states && data.states[pin] !== undefined) {
+                                updatePin(pin, data.states[pin]);
+                            } else {
+                                updatePin(pin, 0);
+                            }
                         }
                     }
                 }
@@ -305,7 +322,7 @@
             if (!pin) return;
             const result = await apiCall('PUT', `/api/pins/${pin}/pull`, {mode: mode});
             if (result) {
-                await refreshPinView();
+                await refreshPinView(true); // Force refresh to get updated state
             }
         }
 
@@ -335,7 +352,7 @@
             });
 
             if (result) {
-                await refreshPinView();
+                await refreshPinView(true); // Force refresh to get updated state
             }
         }
 
@@ -344,7 +361,7 @@
             if (!pin) return;
             const result = await apiCall('PUT', `/api/pins/${pin}/inverted`);
             if (result) {
-                await refreshPinView();
+                await refreshPinView(true); // Force refresh to get updated state
             }
         }
 
@@ -353,7 +370,7 @@
             if (!pin) return;
             const result = await apiCall('DELETE', `/api/pins/${pin}/inverted`);
             if (result) {
-                await refreshPinView();
+                await refreshPinView(true); // Force refresh to get updated state
             }
         }
 
@@ -362,7 +379,7 @@
             if (!pin) return;
             const result = await apiCall('DELETE', `/api/pins/${pin}/debounce`);
             if (result) {
-                await refreshPinView();
+                await refreshPinView(true); // Force refresh to get updated state
             }
         }
 
@@ -415,12 +432,13 @@
             const eventDiv = document.createElement('div');
             eventDiv.className = 'event ' + type.replace('gpio_', '');
 
-            const arrow = data.state == 1 ? '↑' : '↓';
-            let text = '#' + eventCount + ' [' + data.time + '] GPIO' + data.pin + ' ' + arrow;
+            const arrow = data.state == 1 ? '&uarr;' : '&darr;';
+            let text = '#' + eventCount + ' [' + data.time + '] GPIO' + data.pin + ' ';
+            eventDiv.innerHTML = text + arrow;
+
             if (data.confidence) {
-                text += ' (' + data.confidence + ')';
+                eventDiv.innerHTML += ' (' + data.confidence + ')';
             }
-            eventDiv.textContent = text;
 
             const container = document.getElementById('events');
             container.insertBefore(eventDiv, container.firstChild);
@@ -433,6 +451,11 @@
         eventSource.onerror = () => {
             document.getElementById('status').textContent = 'Disconnected';
         };
+
+        // Initial load with forced refresh
+        window.addEventListener('load', () => {
+            refreshPinView(true);
+        });
     </script>
 </body>
 </html>
