@@ -98,6 +98,9 @@ chmod 755 ${PACKAGE_DIR}/DEBIAN/postrm
 cp gpio-monitor.py ${PACKAGE_DIR}/usr/lib/gpio-monitor/
 chmod 755 ${PACKAGE_DIR}/usr/lib/gpio-monitor/gpio-monitor.py
 
+cp index.html ${PACKAGE_DIR}/usr/lib/gpio-monitor/
+chmod 755 ${PACKAGE_DIR}/usr/lib/gpio-monitor/index.html
+
 cp gpio-monitor-cli.py ${PACKAGE_DIR}/usr/bin/gpio-monitor
 chmod 755 ${PACKAGE_DIR}/usr/bin/gpio-monitor
 

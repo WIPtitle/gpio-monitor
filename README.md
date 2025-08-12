@@ -6,8 +6,8 @@ This is a utility service that monitors GPIO pins on a Raspberry Pi and sends se
 
 The service continuously monitors selected GPIO pins and emits real-time events when their state changes (HIGH/LOW). It provides:
 - Server-Sent Events (SSE) for real-time state notifications
-- REST API for dynamic pin management without service restarts
-- Web dashboard for visual monitoring
+- REST API for dynamic pin management
+- Web dashboard for visual monitoring and managing
 - CLI utility for system administration
 - Configurable debouncing to filter noise from mechanical switches or electrically noisy environments
 - Pull resistor configuration (up/down/none) for proper pin biasing
@@ -23,7 +23,7 @@ Configuration is stored in `/etc/gpio-monitor/config.json` and includes the moni
 You can build your own deb package by using the build-deb.sh script:
 ```bash
 ./build-deb.sh
-sudo dpkg -i build/gpio-monitor_2.0.0_all.deb
+sudo dpkg -i build/gpio-monitor_*_all.deb
 ```
 
 ## Usage
@@ -55,12 +55,13 @@ You can set the debouncing value to LOW, MEDIUM or HIGH: it means, respectively,
 
 As an example: long cables or electrically noisy environments can cause wrongly triggered events, like a magnetic reed sensor that jumps between open and closed (particularly when the circuit is not closed, since it works like an antenna and it picks up noise): debouncing fixes this essentially ignoring the status change if it's not consistent a certain amount of times.
 
+Note: you can also use debouncing as a confidence level for your sensors, for example if you have a motion sensor setting a debouncing value could help minimize fake readings. 
+
 ## System Requirements
 
 - Raspberry Pi with GPIO pins
 - Python 3.7 or higher
-- systemd
-- No external Python dependencies
+- Systemd
 
 ## Configuration
 
@@ -77,9 +78,6 @@ The service will warn when adding these pins but allows monitoring if needed.
 ## Uninstallation
 
 ```bash
-# Remove package (keeps configuration)
+# Remove package
 sudo dpkg -r gpio-monitor
-
-# Complete removal (including configuration)
-sudo dpkg --purge gpio-monitor
 ```

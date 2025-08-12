@@ -10,6 +10,8 @@ import time
 from datetime import datetime
 
 CONFIG_FILE = "/etc/gpio-monitor/config.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+HTML_FILE = os.path.join(SCRIPT_DIR, "index.html")
 DEFAULT_PORT = 8787
 POLL_INTERVAL = 0.1
 
@@ -100,10 +102,6 @@ class GPIOMonitor:
         """Initialize state for a single pin"""
         pin_cfg = self.pin_config.get(str(pin), {})
 
-        # Configure pull resistor if specified
-        if 'pull' in pin_cfg:
-            self.configure_pin_pull(pin, pin_cfg['pull'])
-
         # Check if debouncing is enabled for this pin
         if 'debounce' in pin_cfg:
             # Need 10 initial readings for debounced pins
@@ -128,11 +126,6 @@ class GPIOMonitor:
                     self.gpio_states[pin] = value
             except:
                 pass
-
-    def configure_pin_pull(self, pin, pull_mode):
-        """Configure pull resistor for a GPIO pin"""
-        # Configuration is handled directly in read_gpio
-        pass
 
     def config_watcher(self):
         """Watch for config file changes"""
@@ -403,6 +396,9 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                     config["monitored_pins"] = monitored
                     save_config(config)
 
+                    # Reload monitor config immediately
+                    monitor.reload_config()
+
                     response = {
                         "message": f"Added GPIO {pin} to monitoring",
                         "monitored": monitored
@@ -452,6 +448,9 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                 config["pin_config"] = pin_config
                 save_config(config)
 
+                # Reload monitor config immediately
+                monitor.reload_config()
+
                 self.send_json_response(200, {"message": message})
             except:
                 self.send_json_response(400, {"error": "Invalid request"})
@@ -488,6 +487,9 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                 config["pin_config"] = pin_config
                 save_config(config)
 
+                # Reload monitor config immediately
+                monitor.reload_config()
+
                 self.send_json_response(200, {"message": message})
             except:
                 self.send_json_response(400, {"error": "Invalid request"})
@@ -500,6 +502,10 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
             config = load_config()
             config["monitored_pins"] = []
             save_config(config)
+
+            # Reload monitor config immediately
+            monitor.reload_config()
+
             self.send_json_response(200, {"message": "Cleared all monitored pins"})
 
         elif self.path.startswith('/api/pins/') and self.path.endswith('/debounce'):
@@ -523,6 +529,9 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
 
                 config["pin_config"] = pin_config
                 save_config(config)
+
+                # Reload monitor config immediately
+                monitor.reload_config()
 
                 self.send_json_response(200, {"message": message})
             except:
@@ -550,6 +559,9 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
 
                     save_config(config)
 
+                    # Reload monitor config immediately
+                    monitor.reload_config()
+
                     self.send_json_response(200, {
                         "message": f"Removed GPIO {pin} from monitoring",
                         "monitored": monitored
@@ -567,337 +579,11 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
     def get_html_page(self):
-        return '''<!DOCTYPE html>
-<html>
-<head>
-    <title>GPIO Monitor</title>
-    <style>
-        body { 
-            font-family: monospace; 
-            background: #1a1a1a; 
-            color: #0f0;
-            padding: 20px;
-        }
-        h1, h2, h3 { color: #0f0; }
-        .container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin: 20px 0;
-        }
-        .panel {
-            background: #0a0a0a;
-            border: 1px solid #333;
-            border-radius: 5px;
-            padding: 15px;
-        }
-        .pin-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
-            gap: 10px;
-            margin: 20px 0;
-        }
-        .pin {
-            padding: 10px;
-            text-align: center;
-            border: 2px solid #333;
-            border-radius: 5px;
-            transition: all 0.3s;
-        }
-        .pin.high {
-            background: #f00;
-            color: #fff;
-            border-color: #f00;
-            box-shadow: 0 0 10px #f00;
-        }
-        .pin.low {
-            background: #111;
-            color: #666;
-        }
-        #events {
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid #333;
-            padding: 10px;
-            background: #0a0a0a;
-        }
-        .event {
-            padding: 3px 0;
-            border-bottom: 1px solid #222;
-        }
-        .event.rising { color: #f00; }
-        .event.falling { color: #666; }
-        .status {
-            padding: 5px;
-            background: #030;
-            border: 1px solid #0f0;
-            margin-bottom: 10px;
-        }
-        .form-group {
-            margin: 10px 0;
-        }
-        input, select, button {
-            background: #222;
-            color: #0f0;
-            border: 1px solid #0f0;
-            padding: 5px 10px;
-            margin: 2px;
-            border-radius: 3px;
-        }
-        button:hover {
-            background: #333;
-            cursor: pointer;
-        }
-        button:active {
-            background: #0f0;
-            color: #000;
-        }
-        .response {
-            margin-top: 10px;
-            padding: 10px;
-            background: #111;
-            border: 1px solid #444;
-            border-radius: 3px;
-            font-size: 12px;
-            max-height: 100px;
-            overflow-y: auto;
-        }
-        .response.error {
-            border-color: #f00;
-            color: #f88;
-        }
-        .response.success {
-            border-color: #0f0;
-            color: #8f8;
-        }
-        .controls {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-        }
-        input[type="number"] {
-            width: 60px;
-        }
-    </style>
-</head>
-<body>
-    <h1>GPIO Monitor Console</h1>
-    <div class="status">Connection: <span id="status">Connecting...</span></div>
-
-    <div class="container">
-        <div class="panel">
-            <h3>Pin States</h3>
-            <div id="pins" class="pin-container"></div>
-        </div>
-
-        <div class="panel">
-            <h3>Control Panel</h3>
-
-            <div class="form-group">
-                <strong>Pin Management</strong><br>
-                <input type="number" id="addPin" placeholder="Pin" min="0" max="27">
-                <button onclick="addPin()">Add Pin</button>
-                <button onclick="removePin()">Remove Pin</button>
-                <button onclick="clearAllPins()">Clear All</button>
-            </div>
-
-            <div class="form-group">
-                <strong>Pin State</strong><br>
-                <input type="number" id="statePin" placeholder="Pin" min="0" max="27">
-                <button onclick="getPinState()">Get State</button>
-            </div>
-
-            <div class="form-group">
-                <strong>Pull Resistor</strong><br>
-                <input type="number" id="pullPin" placeholder="Pin" min="0" max="27">
-                <select id="pullMode">
-                    <option value="up">Pull Up</option>
-                    <option value="down">Pull Down</option>
-                    <option value="none">None</option>
-                </select>
-                <button onclick="setPull()">Set Pull</button>
-            </div>
-
-            <div class="form-group">
-                <strong>Debouncing</strong><br>
-                <input type="number" id="debouncePin" placeholder="Pin" min="0" max="27">
-                <select id="debounceLevel">
-                    <option value="LOW">Low (3/10)</option>
-                    <option value="MEDIUM">Medium (5/10)</option>
-                    <option value="HIGH">High (7/10)</option>
-                </select>
-                <button onclick="setDebounce()">Set</button>
-                <button onclick="removeDebounce()">Remove</button>
-            </div>
-
-            <div class="form-group">
-                <button onclick="getAllPins()">Get All Pins Info</button>
-            </div>
-
-            <div id="apiResponse" class="response" style="display:none;"></div>
-        </div>
-    </div>
-
-    <div class="panel">
-        <h3>Events Log</h3>
-        <div id="events"></div>
-    </div>
-
-    <script>
-        const eventSource = new EventSource('/events');
-        let eventCount = 0;
-        let monitoredPins = [];
-
-        function showResponse(data, isError = false) {
-            const resp = document.getElementById('apiResponse');
-            resp.className = 'response ' + (isError ? 'error' : 'success');
-            resp.textContent = JSON.stringify(data, null, 2);
-            resp.style.display = 'block';
-            setTimeout(() => {
-                resp.style.display = 'none';
-            }, 5000);
-        }
-
-        async function apiCall(method, endpoint, body = null) {
-            try {
-                const options = {
-                    method: method,
-                    headers: body ? {'Content-Type': 'application/json'} : {}
-                };
-                if (body) options.body = JSON.stringify(body);
-
-                const response = await fetch(endpoint, options);
-                const data = await response.json();
-
-                if (!response.ok) {
-                    showResponse(data, true);
-                    return null;
-                }
-
-                showResponse(data);
-                return data;
-            } catch (error) {
-                showResponse({error: error.message}, true);
-                return null;
-            }
-        }
-
-        async function addPin() {
-            const pin = document.getElementById('addPin').value;
-            if (!pin) return;
-            await apiCall('POST', `/api/pins/${pin}`);
-            document.getElementById('addPin').value = '';
-        }
-
-        async function removePin() {
-            const pin = document.getElementById('addPin').value;
-            if (!pin) return;
-            await apiCall('DELETE', `/api/pins/${pin}`);
-            document.getElementById('addPin').value = '';
-        }
-
-        async function clearAllPins() {
-            if (confirm('Clear all monitored pins?')) {
-                await apiCall('DELETE', '/api/pins');
-            }
-        }
-
-        async function getPinState() {
-            const pin = document.getElementById('statePin').value;
-            if (!pin) return;
-            await apiCall('GET', `/api/pins/${pin}/state`);
-        }
-
-        async function setPull() {
-            const pin = document.getElementById('pullPin').value;
-            const mode = document.getElementById('pullMode').value;
-            if (!pin) return;
-            await apiCall('PUT', `/api/pins/${pin}/pull`, {mode: mode});
-        }
-
-        async function setDebounce() {
-            const pin = document.getElementById('debouncePin').value;
-            const level = document.getElementById('debounceLevel').value;
-            if (!pin) return;
-            await apiCall('PUT', `/api/pins/${pin}/debounce`, {level: level});
-        }
-
-        async function removeDebounce() {
-            const pin = document.getElementById('debouncePin').value;
-            if (!pin) return;
-            await apiCall('DELETE', `/api/pins/${pin}/debounce`);
-        }
-
-        async function getAllPins() {
-            await apiCall('GET', '/api/pins');
-        }
-
-        eventSource.onopen = () => {
-            document.getElementById('status').textContent = 'Connected';
-        };
-
-        eventSource.addEventListener('init', (e) => {
-            const data = JSON.parse(e.data);
-            monitoredPins = data.monitored || [];
-
-            document.getElementById('pins').innerHTML = '';
-            if (monitoredPins.length === 0) {
-                document.getElementById('pins').innerHTML = '<div style="color: #666;">No pins configured</div>';
-            } else {
-                for (const [pin, state] of Object.entries(data.pins)) {
-                    updatePin(pin, state);
-                }
-            }
-        });
-
-        eventSource.addEventListener('gpio_rising', handleGpioEvent);
-        eventSource.addEventListener('gpio_falling', handleGpioEvent);
-
-        function handleGpioEvent(e) {
-            const data = JSON.parse(e.data);
-            updatePin(data.pin, data.state);
-            logEvent(e.type, data);
-        }
-
-        function updatePin(pin, state) {
-            let pinDiv = document.getElementById('pin-' + pin);
-            if (!pinDiv) {
-                pinDiv = document.createElement('div');
-                pinDiv.id = 'pin-' + pin;
-                pinDiv.className = 'pin';
-                document.getElementById('pins').appendChild(pinDiv);
-            }
-
-            pinDiv.className = 'pin ' + (state == 1 ? 'high' : 'low');
-            pinDiv.innerHTML = '<strong>GPIO ' + pin + '</strong><br>' + (state == 1 ? 'HIGH' : 'LOW');
-        }
-
-        function logEvent(type, data) {
-            eventCount++;
-            const eventDiv = document.createElement('div');
-            eventDiv.className = 'event ' + type.replace('gpio_', '');
-
-            const arrow = data.state == 1 ? '↑' : '↓';
-            let text = '#' + eventCount + ' [' + data.time + '] GPIO' + data.pin + ' ' + arrow;
-            if (data.confidence) {
-                text += ' (' + data.confidence + ')';
-            }
-            eventDiv.textContent = text;
-
-            const container = document.getElementById('events');
-            container.insertBefore(eventDiv, container.firstChild);
-
-            while (container.children.length > 30) {
-                container.removeChild(container.lastChild);
-            }
-        }
-
-        eventSource.onerror = () => {
-            document.getElementById('status').textContent = 'Disconnected';
-        };
-    </script>
-</body>
-</html>'''
+        if os.path.exists(HTML_FILE):
+            with open(HTML_FILE, 'r', encoding='utf-8') as f:
+                return f.read()
+        else:
+            return "<html><body><h1>GPIO Monitor</h1><p>HTML file not found.</p></body></html>"
 
     def log_message(self, format, *args):
         pass
