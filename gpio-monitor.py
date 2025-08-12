@@ -1,16 +1,13 @@
 #!/usr/bin/python3
 
 import http.server
+import json
+import os
 import socketserver
 import subprocess
-import json
-import time
 import threading
-import os
-import sys
-import urllib.parse
+import time
 from datetime import datetime
-from pathlib import Path
 
 CONFIG_FILE = "/etc/gpio-monitor/config.json"
 DEFAULT_PORT = 8787
@@ -215,7 +212,7 @@ class GPIOMonitor:
                         current_state = self.gpio_states[pin]
                         debounce_threshold = self.get_debounce_threshold(pin)
 
-                        # Process state change (same logic as before)
+                        # Process state change
                         if debounce_threshold is None:
                             if current_reading != current_state:
                                 old_value = current_state
@@ -234,7 +231,7 @@ class GPIOMonitor:
 
                                 self.broadcast_event(f"gpio_{event_type}", event_data)
                         else:
-                            # Debouncing logic (unchanged)
+                            # Debouncing logic
                             if current_reading != current_state:
                                 if pin not in self.gpio_pending_changes:
                                     self.gpio_pending_changes[pin] = {
