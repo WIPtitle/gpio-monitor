@@ -79,6 +79,40 @@ class GPIOMonitor:
         self.config_watcher_thread = threading.Thread(target=self.config_watcher, daemon=True)
         self.config_watcher_thread.start()
 
+    def apply_inversion(self, pin, state):
+        """Apply inversion to a state value if configured for the pin
+
+        Args:
+            pin: GPIO pin number
+            state: Physical state value (0 or 1)
+
+        Returns:
+            Display state value (inverted if configured, otherwise unchanged)
+        """
+        pin_cfg = self.pin_config.get(str(pin), {})
+        if pin_cfg.get('inverted', False):
+            return 1 - state
+        return state
+
+    def get_display_states(self, physical_old, physical_new, pin):
+        """Convert physical states to display states and determine event type
+
+        Args:
+            physical_old: Previous physical state
+            physical_new: New physical state
+            pin: GPIO pin number
+
+        Returns:
+            Tuple of (display_old, display_new, event_type)
+        """
+        display_old = self.apply_inversion(pin, physical_old)
+        display_new = self.apply_inversion(pin, physical_new)
+
+        # Event type is based on DISPLAY values, not physical
+        event_type = "rising" if display_new == 1 else "falling"
+
+        return display_old, display_new, event_type
+
     def reload_config(self):
         """Reload configuration and update monitoring"""
         with self.config_lock:
@@ -187,14 +221,20 @@ class GPIOMonitor:
             if pin in self.gpio_states:
                 state = self.gpio_states[pin]
 
-                # Apply inversion if configured and requested
+                # Apply inversion if requested
                 if apply_inversion:
-                    pin_cfg = self.pin_config.get(str(pin), {})
-                    if pin_cfg.get('inverted', False):
-                        state = 1 - state  # Invert: 0→1, 1→0
+                    state = self.apply_inversion(pin, state)
 
                 return state
             return None
+
+    def get_all_display_states(self):
+        """Get all pin states with inversion applied"""
+        displayed_states = {}
+        with self.config_lock:
+            for pin, state in self.gpio_states.items():
+                displayed_states[pin] = self.apply_inversion(pin, state)
+        return displayed_states
 
     def monitor_loop(self):
         while True:
@@ -224,14 +264,10 @@ class GPIOMonitor:
                                 new_value = current_reading
                                 self.gpio_states[pin] = new_value
 
-                                display_old = old_value
-                                display_new = new_value
-                                pin_cfg = self.pin_config.get(str(pin), {})
-                                if pin_cfg.get('inverted', False):
-                                    display_old = 1 - old_value
-                                    display_new = 1 - new_value
-
-                                event_type = "rising" if new_value == 1 else "falling"
+                                # Get display values and event type
+                                display_old, display_new, event_type = self.get_display_states(
+                                    old_value, new_value, pin
+                                )
 
                                 event_data = {
                                     "pin": pin,
@@ -264,12 +300,15 @@ class GPIOMonitor:
 
                                             self.gpio_states[pin] = new_value
 
-                                            event_type = "rising" if new_value == 1 else "falling"
+                                            # Get display values and event type
+                                            display_old, display_new, event_type = self.get_display_states(
+                                                old_value, new_value, pin
+                                            )
 
                                             event_data = {
                                                 "pin": pin,
-                                                "state": new_value,
-                                                "previous": old_value,
+                                                "state": display_new,
+                                                "previous": display_old,
                                                 "timestamp": int(time.time() * 1000),
                                                 "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                                                 "confidence": f"{new_state_count}/10"
@@ -295,12 +334,15 @@ class GPIOMonitor:
 
                                             self.gpio_states[pin] = new_value
 
-                                            event_type = "rising" if new_value == 1 else "falling"
+                                            # Get display values and event type
+                                            display_old, display_new, event_type = self.get_display_states(
+                                                old_value, new_value, pin
+                                            )
 
                                             event_data = {
                                                 "pin": pin,
-                                                "state": new_value,
-                                                "previous": old_value,
+                                                "state": display_new,
+                                                "previous": display_old,
                                                 "timestamp": int(time.time() * 1000),
                                                 "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                                                 "confidence": f"{new_state_count}/10"
@@ -353,13 +395,8 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
 
             monitor.clients.append(self.wfile)
 
-            displayed_states = {}
-            for pin, state in monitor.gpio_states.items():
-                pin_cfg = monitor.pin_config.get(str(pin), {})
-                if pin_cfg.get('inverted', False):
-                    displayed_states[pin] = 1 - state
-                else:
-                    displayed_states[pin] = state
+            # Get all states with inversion applied
+            displayed_states = monitor.get_all_display_states()
 
             init_data = {
                 "pins": displayed_states,
@@ -382,20 +419,23 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/pins':
             # GET all pins info
             config = load_config()
+            # Get display states for the response
+            displayed_states = monitor.get_all_display_states()
+
             response = {
                 "monitored": monitor.monitored_pins,
                 "available": monitor.available_pins,
                 "reserved": monitor.reserved_pins,
-                "states": monitor.gpio_states,
+                "states": displayed_states,  # Use display states here
                 "config": config.get("pin_config", {})
             }
             self.send_json_response(200, response)
 
         elif self.path.startswith('/api/pins/') and self.path.endswith('/state'):
-            # GET pin state
+            # GET pin state - already uses get_pin_state which applies inversion
             try:
                 pin = int(self.path.split('/')[3])
-                state = monitor.get_pin_state(pin)
+                state = monitor.get_pin_state(pin)  # This already applies inversion
                 if state is not None:
                     self.send_json_response(200, {"pin": pin, "state": state})
                 else:
@@ -531,6 +571,7 @@ class SSEHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json_response(200, {"message": message})
             except:
                 self.send_json_response(400, {"error": "Invalid request"})
+
         elif self.path.startswith('/api/pins/') and '/inverted' in self.path:
             # PUT to set inverted logic
             try:

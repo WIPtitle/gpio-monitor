@@ -301,6 +301,8 @@ def list_pins():
                     configs.append(f"pull-{cfg['pull']}")
                 if 'debounce_low' in cfg and 'debounce_high' in cfg:
                     configs.append(f"debounce(L:{cfg['debounce_low']}/10, H:{cfg['debounce_high']}/10)")
+                if cfg.get('inverted', False):
+                    configs.append("INVERTED")
 
             config_str = ", ".join(configs) if configs else "no special config"
             print(f"  GPIO {pin:2d}: {config_str}")
