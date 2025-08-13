@@ -58,8 +58,8 @@
             padding: 3px 0;
             border-bottom: 1px solid #222;
         }
-        .event.rising { color: #f00; }
-        .event.falling { color: #666; }
+        .event.high { color: #f00; }
+        .event.low { color: #666; }
         .status {
             padding: 5px;
             background: #030;
@@ -229,7 +229,6 @@
                 if (monitoredPins.length === 0) {
                     document.getElementById('pins').innerHTML = '<div style="color: #666;">No pins configured</div>';
                 } else {
-                    // If forceRefresh is true, get the actual state of each pin
                     if (forceRefresh) {
                         for (const pin of monitoredPins) {
                             try {
@@ -242,7 +241,6 @@
                             }
                         }
                     } else {
-                        // Use cached states from the general pins endpoint
                         for (const pin of monitoredPins) {
                             if (data.states && data.states[pin] !== undefined) {
                                 updatePin(pin, data.states[pin]);
@@ -322,7 +320,7 @@
             if (!pin) return;
             const result = await apiCall('PUT', `/api/pins/${pin}/pull`, {mode: mode});
             if (result) {
-                await refreshPinView(true); // Force refresh to get updated state
+                await refreshPinView(true);
             }
         }
 
@@ -352,7 +350,7 @@
             });
 
             if (result) {
-                await refreshPinView(true); // Force refresh to get updated state
+                await refreshPinView(true);
             }
         }
 
@@ -361,7 +359,7 @@
             if (!pin) return;
             const result = await apiCall('PUT', `/api/pins/${pin}/inverted`);
             if (result) {
-                await refreshPinView(true); // Force refresh to get updated state
+                await refreshPinView(true);
             }
         }
 
@@ -370,7 +368,7 @@
             if (!pin) return;
             const result = await apiCall('DELETE', `/api/pins/${pin}/inverted`);
             if (result) {
-                await refreshPinView(true); // Force refresh to get updated state
+                await refreshPinView(true);
             }
         }
 
@@ -379,7 +377,7 @@
             if (!pin) return;
             const result = await apiCall('DELETE', `/api/pins/${pin}/debounce`);
             if (result) {
-                await refreshPinView(true); // Force refresh to get updated state
+                await refreshPinView(true);
             }
         }
 
@@ -405,14 +403,11 @@
             }
         });
 
-        eventSource.addEventListener('gpio_rising', handleGpioEvent);
-        eventSource.addEventListener('gpio_falling', handleGpioEvent);
-
-        function handleGpioEvent(e) {
+        eventSource.addEventListener('gpio_change', (e) => {
             const data = JSON.parse(e.data);
             updatePin(data.pin, data.state);
-            logEvent(e.type, data);
-        }
+            logEvent(data);
+        });
 
         function updatePin(pin, state) {
             let pinDiv = document.getElementById('pin-' + pin);
@@ -427,14 +422,14 @@
             pinDiv.innerHTML = '<strong>GPIO ' + pin + '</strong><br>' + (state == 1 ? 'HIGH' : 'LOW');
         }
 
-        function logEvent(type, data) {
+        function logEvent(data) {
             eventCount++;
             const eventDiv = document.createElement('div');
-            eventDiv.className = 'event ' + type.replace('gpio_', '');
+            eventDiv.className = 'event ' + (data.state == 1 ? 'high' : 'low');
 
             const arrow = data.state == 1 ? '&uarr;' : '&darr;';
             let text = '#' + eventCount + ' [' + data.time + '] GPIO' + data.pin + ' ';
-            eventDiv.innerHTML = text + arrow;
+            eventDiv.innerHTML = text + arrow + ' ' + (data.state == 1 ? 'HIGH' : 'LOW');
 
             if (data.confidence) {
                 eventDiv.innerHTML += ' (' + data.confidence + ')';
@@ -452,7 +447,6 @@
             document.getElementById('status').textContent = 'Disconnected';
         };
 
-        // Initial load with forced refresh
         window.addEventListener('load', () => {
             refreshPinView(true);
         });

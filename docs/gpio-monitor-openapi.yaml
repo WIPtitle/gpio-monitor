@@ -66,6 +66,7 @@ paths:
                     additionalProperties:
                       type: integer
                       enum: [0, 1]
+                    description: Virtual states (with inversion applied if configured)
                     example:
                       '17': 0
                       '27': 1
@@ -87,11 +88,15 @@ paths:
                           minimum: 1
                           maximum: 10
                           description: Threshold for LOW to HIGH transition
+                        inverted:
+                          type: boolean
+                          description: Whether pin logic is inverted
                     example:
                       '17':
                         pull: down
                         debounce_low: 6
                         debounce_high: 8
+                        inverted: false
 
     delete:
       tags:
@@ -225,7 +230,7 @@ paths:
       tags:
         - State
       summary: Get pin state
-      description: Returns the current state (HIGH/LOW) of a monitored GPIO pin
+      description: Returns the current virtual state (HIGH/LOW) of a monitored GPIO pin (with inversion applied if configured)
       operationId: getPinState
       parameters:
         - name: pin
@@ -250,7 +255,7 @@ paths:
                   state:
                     type: integer
                     enum: [0, 1]
-                    description: '0 = LOW, 1 = HIGH'
+                    description: '0 = LOW, 1 = HIGH (virtual state with inversion applied)'
                     example: 0
         '400':
           description: Invalid pin number
@@ -356,9 +361,10 @@ paths:
         Configures asymmetric debouncing for a GPIO pin to filter noise and false triggers.
         Requires both LOW and HIGH threshold values.
         
-        - LOW threshold: Applied for HIGH→LOW transitions
-        - HIGH threshold: Applied for LOW→HIGH transitions
-        - Values from 1-10 (1=minimal filtering, 10=maximum filtering)
+        - LOW threshold: Applied for HIGH → LOW transitions
+        - HIGH threshold: Applied for LOW → HIGH transitions
+        - Values from 1-10 (1=minimal filtering, 10=maximum filtering) that represent the number of readings out of 10
+          confirm a status change.
         - Each reading cycle takes ~1 second (10 readings at 0.1s intervals)
       operationId: setDebounce
       parameters:
@@ -384,12 +390,12 @@ paths:
                   type: integer
                   minimum: 1
                   maximum: 10
-                  description: Threshold for HIGH→LOW transition (1-10 readings out of 10)
+                  description: Threshold for HIGH → LOW transition (1-10 readings out of 10)
                 high:
                   type: integer
                   minimum: 1
                   maximum: 10
-                  description: Threshold for LOW→HIGH transition (1-10 readings out of 10)
+                  description: Threshold for LOW → HIGH transition (1-10 readings out of 10)
             examples:
               symmetric:
                 summary: Symmetric filtering (same for both transitions)
@@ -569,6 +575,7 @@ paths:
                   error:
                     type: string
                     example: 'GPIO 17 not monitored'
+
   /events:
     get:
       tags:
@@ -579,9 +586,9 @@ paths:
         
         Event types:
         - `init`: Initial state of all monitored pins
-        - `gpio_rising`: Pin changed from LOW to HIGH
-        - `gpio_falling`: Pin changed from HIGH to LOW
+        - `gpio_change`: Pin state changed
         
+        The state value in events represents the virtual state (with inversion applied if configured).
         Events include confidence level when debouncing is enabled.
         
         This is an SSE endpoint, not a regular REST endpoint.
@@ -597,11 +604,11 @@ paths:
                   event: init
                   data: {"pins": {"17": 0, "27": 1}, "monitored": [17, 27], "available": [2, 3, ...], "timestamp": 1699123456789}
                   
-                  event: gpio_rising
-                  data: {"pin": 17, "state": 1, "previous": 0, "timestamp": 1699123456789, "time": "14:23:45.123", "confidence": "8/10"}
+                  event: gpio_change
+                  data: {"pin": 17, "state": 1, "timestamp": 1699123456789, "time": "14:23:45.123"}
                   
-                  event: gpio_falling
-                  data: {"pin": 17, "state": 0, "previous": 1, "timestamp": 1699123456789, "time": "14:23:45.123", "confidence": "6/10"}
+                  event: gpio_change
+                  data: {"pin": 27, "state": 0, "timestamp": 1699123456789, "time": "14:23:45.123", "confidence": "6/10"}
 
   /:
     get:

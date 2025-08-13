@@ -1,64 +1,28 @@
 #!/usr/bin/python3
+"""Command-line interface for GPIO Monitor."""
 
 import sys
-import json
-import os
 import subprocess
 
-CONFIG_FILE = "/etc/gpio-monitor/config.json"
+# Try to import from installed location, fallback to local
+try:
+    # Import from installed package
+    sys.path.insert(0, '/usr/lib/gpio-monitor')
+    from gpio_monitor.config import load_config, save_config
+    from gpio_monitor.gpio_reader import get_available_pins, get_reserved_pins
+except ImportError:
+    # Fallback to local development
+    from gpio_monitor.config import load_config, save_config
+    from gpio_monitor.gpio_reader import get_available_pins, get_reserved_pins
+
 SERVICE_NAME = "gpio-monitor.service"
-
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {"port": 8787, "monitored_pins": [], "pin_config": {}}
-
-
-def save_config(config):
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
-
-
-def get_available_pins():
-    """Test which GPIO pins are available"""
-    available = []
-    for pin in range(28):
-        try:
-            result = subprocess.run(['gpioget', 'gpiochip0', str(pin)],
-                                    capture_output=True, text=True, timeout=0.1)
-            if result.returncode == 0:
-                available.append(pin)
-        except:
-            pass
-
-    if not available:
-        available = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-                     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
-
-    return sorted(available)
-
-
-def get_pin_info():
-    """Get pin categories and warnings"""
-    reserved_pins = {
-        0: "ID_SD (HAT EEPROM)",
-        1: "ID_SC (HAT EEPROM)",
-        2: "SDA1 (I2C)",
-        3: "SCL1 (I2C)",
-        14: "TXD0 (UART)",
-        15: "RXD0 (UART)"
-    }
-    return reserved_pins
 
 
 def add_pin(pin):
     try:
         pin = int(pin)
         available = get_available_pins()
-        reserved = get_pin_info()
+        reserved = get_reserved_pins()
 
         if pin not in available:
             print(f"Error: GPIO {pin} is not available on this device")
@@ -177,10 +141,7 @@ def remove_inverted(pin):
 
 
 def set_debounce(args):
-    """Set debounce thresholds for a GPIO pin
-
-    Expected format: <pin> LOW <low_value> HIGH <high_value>
-    """
+    """Set debounce thresholds for a GPIO pin"""
     if len(args) != 5:
         print("Error: Invalid format")
         print("Usage: gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
@@ -226,8 +187,8 @@ def set_debounce(args):
         pin_config[str(pin)]['debounce_high'] = high_value
 
         print(f"Set GPIO {pin} debouncing:")
-        print(f"  HIGH→LOW transition: {low_value}/10 readings required")
-        print(f"  LOW→HIGH transition: {high_value}/10 readings required")
+        print(f"  HIGH → LOW transition: {low_value}/10 readings required")
+        print(f"  LOW → HIGH transition: {high_value}/10 readings required")
         print("Events will be delayed by ~1 second for stability")
 
         config["pin_config"] = pin_config
@@ -283,7 +244,7 @@ def list_pins():
     config = load_config()
     monitored = config.get("monitored_pins", [])
     available = get_available_pins()
-    reserved = get_pin_info()
+    reserved = get_reserved_pins()
     pin_config = config.get("pin_config", {})
 
     print("GPIO Pin Status")
@@ -324,7 +285,7 @@ def list_pins():
 def clear_pins():
     config = load_config()
     config["monitored_pins"] = []
-    config["pin_config"] = {}  # Also clear pin configurations
+    config["pin_config"] = {}
     save_config(config)
     print("Cleared all monitored pins")
 
@@ -435,7 +396,7 @@ def show_help():
     print("  gpio-monitor set-debounce <pin> LOW <1-10> HIGH <1-10>")
     print("                                        Set asymmetric debouncing thresholds")
     print("  gpio-monitor remove-debounce <pin>   Remove debouncing")
-    print("  gpio-monitor set-inverted <pin>      Set inverted logic when reading state (HIGH ↔ LOW) (doesn't change internal state")
+    print("  gpio-monitor set-inverted <pin>      Set inverted logic (HIGH ↔ LOW)")
     print("  gpio-monitor remove-inverted <pin>   Remove inverted logic")
     print("")
     print("Service Control:")
@@ -452,7 +413,7 @@ def show_help():
     print("Debounce thresholds (1-10):")
     print("  LOW threshold:  Applied for HIGH → LOW transitions")
     print("  HIGH threshold: Applied for LOW → HIGH transitions")
-    print("  1  = one read of value for status change ")
+    print("  1  = one read of value for status change")
     print("  5  = five reads of value for status change")
     print("  10 = ten reads of value for status change")
     print("")
@@ -478,7 +439,6 @@ def main():
     elif command == "set-pull" and len(sys.argv) == 4:
         set_pull(sys.argv[2], sys.argv[3])
     elif command == "set-debounce" and len(sys.argv) >= 7:
-        # Pass all arguments after 'set-debounce' and pin number
         set_debounce(sys.argv[2:])
     elif command == "remove-debounce" and len(sys.argv) == 3:
         remove_debounce(sys.argv[2])

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 PACKAGE_NAME="gpio-monitor"
-VERSION="2.0.0"
+VERSION="2.1.0"
 ARCH="all"
 MAINTAINER="Matteo Galvagni <galvagni.matteo@protonmail.com>"
 DESCRIPTION="GPIO real-time monitoring server with SSE and REST API support"
@@ -11,16 +11,20 @@ PACKAGE_DIR="${BUILD_DIR}/${PACKAGE_NAME}_${VERSION}_${ARCH}"
 
 echo "Building ${PACKAGE_NAME} version ${VERSION}..."
 
+# Clean build directory
 rm -rf ${BUILD_DIR}
 mkdir -p ${BUILD_DIR}
 
+# Create package structure
 mkdir -p ${PACKAGE_DIR}/DEBIAN
-mkdir -p ${PACKAGE_DIR}/usr/lib/gpio-monitor
+mkdir -p ${PACKAGE_DIR}/usr/lib/gpio-monitor/gpio_monitor
+mkdir -p ${PACKAGE_DIR}/usr/lib/gpio-monitor/web
 mkdir -p ${PACKAGE_DIR}/usr/bin
 mkdir -p ${PACKAGE_DIR}/etc/gpio-monitor
 mkdir -p ${PACKAGE_DIR}/lib/systemd/system
 mkdir -p ${PACKAGE_DIR}/usr/share/doc/gpio-monitor
 
+# Create control file
 cat > ${PACKAGE_DIR}/DEBIAN/control << EOF
 Package: ${PACKAGE_NAME}
 Version: ${VERSION}
@@ -36,6 +40,7 @@ Description: ${DESCRIPTION}
 Depends: python3 (>= 3.7), systemd
 EOF
 
+# Create postinst script
 cat > ${PACKAGE_DIR}/DEBIAN/postinst << 'EOF'
 #!/bin/bash
 set -e
@@ -62,6 +67,7 @@ echo ""
 exit 0
 EOF
 
+# Create prerm script
 cat > ${PACKAGE_DIR}/DEBIAN/prerm << 'EOF'
 #!/bin/bash
 set -e
@@ -72,6 +78,7 @@ systemctl disable gpio-monitor.service || true
 exit 0
 EOF
 
+# Create postrm script
 cat > ${PACKAGE_DIR}/DEBIAN/postrm << 'EOF'
 #!/bin/bash
 set -e
@@ -85,22 +92,32 @@ systemctl daemon-reload
 exit 0
 EOF
 
+# Set permissions for DEBIAN scripts
 chmod 755 ${PACKAGE_DIR}/DEBIAN/postinst
 chmod 755 ${PACKAGE_DIR}/DEBIAN/prerm
 chmod 755 ${PACKAGE_DIR}/DEBIAN/postrm
 
-cp gpio-monitor.py ${PACKAGE_DIR}/usr/lib/gpio-monitor/
-chmod 755 ${PACKAGE_DIR}/usr/lib/gpio-monitor/gpio-monitor.py
+# Copy Python modules
+cp -r gpio_monitor/* ${PACKAGE_DIR}/usr/lib/gpio-monitor/gpio_monitor/
+chmod -R 755 ${PACKAGE_DIR}/usr/lib/gpio-monitor/gpio_monitor/
 
-cp index.html ${PACKAGE_DIR}/usr/lib/gpio-monitor/
-chmod 755 ${PACKAGE_DIR}/usr/lib/gpio-monitor/index.html
+# Copy main script
+cp gpio-monitor-main.py ${PACKAGE_DIR}/usr/lib/gpio-monitor/
+chmod 755 ${PACKAGE_DIR}/usr/lib/gpio-monitor/gpio-monitor-main.py
 
+# Copy web files
+cp web/index.html ${PACKAGE_DIR}/usr/lib/gpio-monitor/web/
+chmod 644 ${PACKAGE_DIR}/usr/lib/gpio-monitor/web/index.html
+
+# Copy CLI script
 cp gpio-monitor-cli.py ${PACKAGE_DIR}/usr/bin/gpio-monitor
 chmod 755 ${PACKAGE_DIR}/usr/bin/gpio-monitor
 
-cp gpio-monitor.service ${PACKAGE_DIR}/lib/systemd/system/
+# Copy systemd service
+cp debian/gpio-monitor.service ${PACKAGE_DIR}/lib/systemd/system/
 chmod 644 ${PACKAGE_DIR}/lib/systemd/system/gpio-monitor.service
 
+# Create default config
 echo '{"port": 8787, "monitored_pins": []}' > ${PACKAGE_DIR}/etc/gpio-monitor/config.json
 chmod 644 ${PACKAGE_DIR}/etc/gpio-monitor/config.json
 
@@ -109,14 +126,15 @@ if [ -f README.md ]; then
     cp README.md ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/
 fi
 
-if [ -f gpio-monitor-openapi.yaml ]; then
-    cp gpio-monitor-openapi.yaml ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/
+if [ -f docs/gpio-monitor-openapi.yaml ]; then
+    cp docs/gpio-monitor-openapi.yaml ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/
     chmod 644 ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/gpio-monitor-openapi.yaml
 fi
 
-# Create a version file
+# Create version file
 echo "${VERSION}" > ${PACKAGE_DIR}/usr/share/doc/gpio-monitor/VERSION
 
+# Build the package
 dpkg-deb --build ${PACKAGE_DIR}
 
 if [ $? -eq 0 ]; then

@@ -1,0 +1,13 @@
+[Unit]
+Description=GPIO Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/lib/gpio-monitor/gpio-monitor-main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
