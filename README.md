@@ -80,4 +80,7 @@ The service will warn when adding these pins but allows monitoring if needed.
 ```bash
 # Remove package
 sudo dpkg -r gpio-monitor
+
+# Remove package and all data
+sudo dpkg -r --purge mp3-player-server
 ```
