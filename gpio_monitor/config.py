@@ -5,7 +5,8 @@ import json
 import os
 from typing import Dict, List, Any
 
-CONFIG_FILE = "/etc/gpio-monitor/config.json"
+# Config path from env var, default to /etc for production
+CONFIG_FILE = os.environ.get("GPIO_MONITOR_CONFIG_PATH", "/etc/gpio-monitor/config.json")
 DEFAULT_PORT = 8787
 
 
@@ -36,11 +37,14 @@ class ConfigManager:
         os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
 
     def load(self) -> Dict[str, Any]:
-        """Load configuration from file."""
+        """Load configuration from file. Creates default config if not exists."""
         if os.path.exists(self.config_file):
             with open(self.config_file, 'r') as f:
                 return json.load(f)
-        return self.get_default_config()
+        # Create default config file
+        default_config = self.get_default_config()
+        self.save(default_config)
+        return default_config
 
     def save(self, config: Dict[str, Any]) -> None:
         """Save configuration to file."""

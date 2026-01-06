@@ -39,19 +39,25 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
             self._get_all_pins()
         elif self.path.startswith('/api/pins/') and self.path.endswith('/state'):
             self._get_pin_state()
+        elif self.path == '/api/dev-mode':
+            self._get_dev_mode()
         else:
             self.send_error(404, "Not Found")
 
     def do_POST(self):
         """Handle POST requests."""
-        if self.path.startswith('/api/pins/'):
+        if self.path.startswith('/api/pins/') and self.path.endswith('/trigger'):
+            self._trigger_pin()
+        elif self.path.startswith('/api/pins/'):
             self._add_pin()
         else:
             self.send_error(404, "Not Found")
 
     def do_PUT(self):
         """Handle PUT requests."""
-        if self.path.startswith('/api/pins/') and '/pull' in self.path:
+        if self.path == '/api/dev-mode':
+            self._set_dev_mode()
+        elif self.path.startswith('/api/pins/') and '/pull' in self.path:
             self._set_pull()
         elif self.path.startswith('/api/pins/') and '/debounce' in self.path:
             self._set_debounce()
@@ -102,9 +108,10 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
         # Send initial state
         init_data = {
             "pins": self.monitor.get_all_virtual_states(),
-            "monitored": self.monitor.monitored_pins,
-            "available": self.monitor.available_pins,
-            "timestamp": int(time.time() * 1000)
+            "monitored": self.monitor.get_current_monitored_pins(),
+            "available": self.monitor.get_current_available_pins(),
+            "timestamp": int(time.time() * 1000),
+            "dev_mode": self.monitor.dev_mode
         }
 
         self.wfile.write(f"event: init\ndata: {json.dumps(init_data)}\n\n".encode())
@@ -124,11 +131,12 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
         config = self.monitor.config_manager.load()
 
         response = {
-            "monitored": self.monitor.monitored_pins,
-            "available": self.monitor.available_pins,
+            "monitored": self.monitor.get_current_monitored_pins(),
+            "available": self.monitor.get_current_available_pins(),
             "reserved": self.monitor.reserved_pins,
             "states": self.monitor.get_all_virtual_states(),
-            "config": config.get("pin_config", {})
+            "config": config.get("pin_config", {}) if not self.monitor.dev_mode else {},
+            "dev_mode": self.monitor.dev_mode
         }
         self._send_json_response(200, response)
 
@@ -150,8 +158,18 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             pin = int(self.path.split('/')[3])
 
+            # Dev mode: use separate in-memory pin list
+            if self.monitor.dev_mode:
+                result = self.monitor.add_dev_pin(pin)
+                if "error" in result:
+                    self._send_json_response(400, result)
+                else:
+                    self._send_json_response(200, result)
+                return
+
+            # Real mode: check hardware availability
             if pin not in self.monitor.available_pins:
-                self._send_json_response(400, {"error": f"GPIO {pin} not available"})
+                self._send_json_response(400, {"error": f"GPIO {pin} not available (no hardware detected)"})
                 return
 
             config = self.monitor.config_manager.load()
@@ -185,6 +203,16 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             pin = int(self.path.split('/')[3])
 
+            # Dev mode: use separate in-memory pin list
+            if self.monitor.dev_mode:
+                result = self.monitor.remove_dev_pin(pin)
+                if "error" in result:
+                    self._send_json_response(404, result)
+                else:
+                    self._send_json_response(200, result)
+                return
+
+            # Real mode
             config = self.monitor.config_manager.load()
             monitored = config.get("monitored_pins", [])
 
@@ -212,6 +240,16 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _clear_all_pins(self):
         """Clear all monitored pins."""
+        if self.monitor.dev_mode:
+            # Dev mode: clear in-memory pins
+            with self.monitor.config_lock:
+                self.monitor.dev_monitored_pins.clear()
+                self.monitor.dev_pin_states.clear()
+                self.monitor.instant_triggers.clear()
+            self._send_json_response(200, {"message": "Cleared all dev mode pins"})
+            return
+
+        # Real mode
         config = self.monitor.config_manager.load()
         config["monitored_pins"] = []
         config["pin_config"] = {}
@@ -374,6 +412,55 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_json_response(200, {"message": message})
         except:
             self._send_json_response(400, {"error": "Invalid pin number"})
+
+    # ==================== Dev Mode Endpoints ====================
+
+    def _get_dev_mode(self):
+        """Get current dev mode status."""
+        response = self.monitor.get_dev_mode()
+        self._send_json_response(200, response)
+
+    def _set_dev_mode(self):
+        """Enable or disable dev mode."""
+        try:
+            data = self._get_request_body()
+            enabled = data.get('enabled')
+
+            if not isinstance(enabled, bool):
+                self._send_json_response(400, {"error": "'enabled' must be a boolean"})
+                return
+
+            result = self.monitor.set_dev_mode(enabled)
+            self._send_json_response(200, result)
+        except:
+            self._send_json_response(400, {"error": "Invalid request"})
+
+    def _trigger_pin(self):
+        """Trigger a pin state change in dev mode."""
+        try:
+            # Extract pin number from path: /api/pins/{pin}/trigger
+            parts = self.path.split('/')
+            pin = int(parts[3])
+
+            data = self._get_request_body()
+            mode = data.get('mode', 'instant')
+
+            if mode not in ['instant', 'endless']:
+                self._send_json_response(400, {"error": "Mode must be 'instant' or 'endless'"})
+                return
+
+            result = self.monitor.trigger_pin(pin, mode)
+
+            if 'error' in result:
+                self._send_json_response(400, result)
+            else:
+                self._send_json_response(200, result)
+        except ValueError:
+            self._send_json_response(400, {"error": "Invalid pin number"})
+        except:
+            self._send_json_response(400, {"error": "Invalid request"})
+
+    # ==================== End Dev Mode Endpoints ====================
 
     def _get_request_body(self) -> Dict[str, Any]:
         """Get and parse request body."""

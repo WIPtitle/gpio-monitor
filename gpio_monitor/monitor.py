@@ -20,6 +20,7 @@ class GPIOMonitor:
     """Main GPIO monitoring class."""
 
     POLL_INTERVAL = 0.1
+    INSTANT_TRIGGER_DURATION = 1.0  # seconds
 
     def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
@@ -41,42 +42,79 @@ class GPIOMonitor:
         self.available_pins = self.gpio_reader.get_available_pins()
         self.reserved_pins = self.gpio_reader.get_reserved_pins()
 
+        # Dev mode state - completely separate from real mode
+        self.dev_mode = False
+        self.dev_monitored_pins: List[int] = []  # Pins monitored in dev mode (in-memory only)
+        self.dev_pin_states: Dict[int, int] = {}  # Simulated states in dev mode
+        self.instant_triggers: Dict[int, Tuple[float, int]] = {}  # pin -> (end_time, original_state)
+        self.dev_available_pins = list(range(28))  # All pins 0-27 available in dev mode
+
         # Initialize
         self.reload_config()
         self._start_config_watcher()
 
-    def get_physical_state(self, pin: int) -> Optional[int]:
-        """Get the physical (actual hardware) state of a pin."""
+    def get_current_monitored_pins(self) -> List[int]:
+        """Get the list of currently monitored pins based on mode."""
         with self.config_lock:
+            return list(self.dev_monitored_pins if self.dev_mode else self.monitored_pins)
+
+    def get_current_available_pins(self) -> List[int]:
+        """Get the list of available pins based on mode."""
+        with self.config_lock:
+            return list(self.dev_available_pins if self.dev_mode else self.available_pins)
+
+    def get_physical_state(self, pin: int) -> Optional[int]:
+        """Get the physical (actual hardware or dev mode) state of a pin."""
+        with self.config_lock:
+            if self.dev_mode:
+                if pin not in self.dev_monitored_pins:
+                    return None
+                return self.dev_pin_states.get(pin)
+            if pin not in self.monitored_pins:
+                return None
             return self.physical_states.get(pin)
 
     def get_virtual_state(self, pin: int) -> Optional[int]:
         """
         Get the virtual (display) state of a pin.
-        Applies inversion if configured.
+        Applies inversion if configured (only in real mode, dev mode has no config).
         """
         with self.config_lock:
-            physical = self.physical_states.get(pin)
-            if physical is None:
-                return None
-
-            # Apply inversion if configured
-            pin_cfg = self.pin_config.get(str(pin), {})
-            if pin_cfg.get('inverted', False):
-                return 1 - physical
-            return physical
+            if self.dev_mode:
+                if pin not in self.dev_monitored_pins:
+                    return None
+                # Dev mode: no inversion, just return raw state
+                return self.dev_pin_states.get(pin)
+            else:
+                if pin not in self.monitored_pins:
+                    return None
+                physical = self.physical_states.get(pin)
+                if physical is None:
+                    return None
+                # Apply inversion if configured
+                pin_cfg = self.pin_config.get(str(pin), {})
+                if pin_cfg.get('inverted', False):
+                    return 1 - physical
+                return physical
 
     def get_all_virtual_states(self) -> Dict[int, int]:
         """Get all pin states with inversion applied."""
         virtual_states = {}
         with self.config_lock:
-            for pin, physical_state in self.physical_states.items():
-                # Apply inversion if configured
-                pin_cfg = self.pin_config.get(str(pin), {})
-                if pin_cfg.get('inverted', False):
-                    virtual_states[pin] = 1 - physical_state
-                else:
-                    virtual_states[pin] = physical_state
+            if self.dev_mode:
+                # Dev mode: return dev states directly (no inversion)
+                for pin in self.dev_monitored_pins:
+                    virtual_states[pin] = self.dev_pin_states.get(pin, 0)
+            else:
+                # Real mode: apply inversion from config
+                for pin in self.monitored_pins:
+                    physical_state = self.physical_states.get(pin)
+                    if physical_state is not None:
+                        pin_cfg = self.pin_config.get(str(pin), {})
+                        if pin_cfg.get('inverted', False):
+                            virtual_states[pin] = 1 - physical_state
+                        else:
+                            virtual_states[pin] = physical_state
         return virtual_states
 
     def reload_config(self):
@@ -86,17 +124,30 @@ class GPIOMonitor:
             self.monitored_pins = config.get("monitored_pins", [])
             self.pin_config = config.get("pin_config", {})
 
-            # Remove states for pins no longer monitored
-            for pin in list(self.physical_states.keys()):
-                if pin not in self.monitored_pins:
-                    del self.physical_states[pin]
-                    if pin in self.pending_changes:
-                        del self.pending_changes[pin]
+            if self.dev_mode:
+                # Dev mode: manage dev_pin_states
+                for pin in list(self.dev_pin_states.keys()):
+                    if pin not in self.monitored_pins:
+                        del self.dev_pin_states[pin]
+                        if pin in self.instant_triggers:
+                            del self.instant_triggers[pin]
 
-            # Initialize states for new pins
-            for pin in self.monitored_pins:
-                if pin not in self.physical_states and pin in self.available_pins:
-                    self._init_pin_state(pin)
+                # Initialize new pins with LOW (0)
+                for pin in self.monitored_pins:
+                    if pin not in self.dev_pin_states:
+                        self.dev_pin_states[pin] = 0
+            else:
+                # Real mode: manage physical_states
+                for pin in list(self.physical_states.keys()):
+                    if pin not in self.monitored_pins:
+                        del self.physical_states[pin]
+                        if pin in self.pending_changes:
+                            del self.pending_changes[pin]
+
+                # Initialize states for new pins
+                for pin in self.monitored_pins:
+                    if pin not in self.physical_states and pin in self.available_pins:
+                        self._init_pin_state(pin)
 
     def _init_pin_state(self, pin: int):
         """Initialize state for a single pin."""
@@ -127,6 +178,153 @@ class GPIOMonitor:
         """Start configuration file watcher thread."""
         thread = threading.Thread(target=self._config_watcher, daemon=True)
         thread.start()
+
+    # ==================== Dev Mode Methods ====================
+
+    def set_dev_mode(self, enabled: bool) -> Dict[str, Any]:
+        """
+        Enable or disable dev mode.
+        Dev mode is completely separate from real mode - separate pins, separate states.
+        """
+        with self.config_lock:
+            if enabled and not self.dev_mode:
+                # Entering dev mode - start fresh (don't copy from real mode)
+                # Keep existing dev pins if any, or start empty
+                pass
+            elif not enabled and self.dev_mode:
+                # Exiting dev mode - clear dev states and instant triggers
+                self.dev_monitored_pins.clear()
+                self.dev_pin_states.clear()
+                self.instant_triggers.clear()
+
+            self.dev_mode = enabled
+            return {"dev_mode": self.dev_mode}
+
+    def get_dev_mode(self) -> Dict[str, Any]:
+        """Get current dev mode status."""
+        with self.config_lock:
+            return {
+                "dev_mode": self.dev_mode,
+                "dev_pins": list(self.dev_monitored_pins),
+                "instant_triggers": {
+                    pin: {
+                        "remaining": max(0, end_time - time.time()),
+                        "original_state": orig_state
+                    }
+                    for pin, (end_time, orig_state) in self.instant_triggers.items()
+                }
+            }
+
+    def add_dev_pin(self, pin: int) -> Dict[str, Any]:
+        """Add a pin in dev mode (in-memory only, not persisted)."""
+        with self.config_lock:
+            if not self.dev_mode:
+                return {"error": "Dev mode is not enabled"}
+
+            if pin < 0 or pin > 27:
+                return {"error": f"Invalid pin {pin}. Must be 0-27"}
+
+            if pin in self.dev_monitored_pins:
+                return {"error": f"Pin {pin} already monitored in dev mode"}
+
+            self.dev_monitored_pins.append(pin)
+            self.dev_monitored_pins.sort()
+            self.dev_pin_states[pin] = 0  # Default to LOW
+
+            return {
+                "message": f"Added GPIO {pin} to dev mode monitoring",
+                "monitored": list(self.dev_monitored_pins)
+            }
+
+    def remove_dev_pin(self, pin: int) -> Dict[str, Any]:
+        """Remove a pin in dev mode."""
+        with self.config_lock:
+            if not self.dev_mode:
+                return {"error": "Dev mode is not enabled"}
+
+            if pin not in self.dev_monitored_pins:
+                return {"error": f"Pin {pin} not monitored in dev mode"}
+
+            self.dev_monitored_pins.remove(pin)
+            if pin in self.dev_pin_states:
+                del self.dev_pin_states[pin]
+            if pin in self.instant_triggers:
+                del self.instant_triggers[pin]
+
+            return {
+                "message": f"Removed GPIO {pin} from dev mode monitoring",
+                "monitored": list(self.dev_monitored_pins)
+            }
+
+    def trigger_pin(self, pin: int, mode: str) -> Dict[str, Any]:
+        """
+        Trigger a pin state change in dev mode.
+
+        Args:
+            pin: GPIO pin number
+            mode: "instant" (1 second then revert) or "endless" (permanent toggle)
+
+        Returns:
+            Result dict with new state info
+        """
+        with self.config_lock:
+            if not self.dev_mode:
+                return {"error": "Dev mode is not enabled"}
+
+            if pin not in self.dev_monitored_pins:
+                return {"error": f"Pin {pin} is not being monitored in dev mode"}
+
+            # Get current state (from dev states or default to 0)
+            current_state = self.dev_pin_states.get(pin, 0)
+            new_state = 1 - current_state  # Toggle
+
+            if mode == "instant":
+                # Check if already in instant trigger
+                if pin in self.instant_triggers:
+                    return {"error": f"Pin {pin} is already in instant trigger mode"}
+
+                # Store original state and set end time
+                self.instant_triggers[pin] = (
+                    time.time() + self.INSTANT_TRIGGER_DURATION,
+                    current_state
+                )
+                self.dev_pin_states[pin] = new_state
+
+            elif mode == "endless":
+                # Clear any instant trigger for this pin
+                if pin in self.instant_triggers:
+                    del self.instant_triggers[pin]
+                self.dev_pin_states[pin] = new_state
+
+            else:
+                return {"error": f"Invalid mode '{mode}'. Use 'instant' or 'endless'"}
+
+            # Trigger the state change event
+            self._handle_state_change(pin, new_state)
+
+            return {
+                "pin": pin,
+                "mode": mode,
+                "new_state": new_state,
+                "reverts_at": self.instant_triggers[pin][0] if pin in self.instant_triggers else None
+            }
+
+    def _check_instant_triggers(self):
+        """Check and revert any expired instant triggers."""
+        current_time = time.time()
+        expired = []
+
+        with self.config_lock:
+            for pin, (end_time, original_state) in self.instant_triggers.items():
+                if current_time >= end_time:
+                    expired.append((pin, original_state))
+
+            for pin, original_state in expired:
+                del self.instant_triggers[pin]
+                self.dev_pin_states[pin] = original_state
+                self._handle_state_change(pin, original_state)
+
+    # ==================== End Dev Mode Methods ====================
 
     def _config_watcher(self):
         """Watch for configuration file changes."""
@@ -163,14 +361,22 @@ class GPIOMonitor:
     def monitor_loop(self):
         """Main monitoring loop."""
         while True:
+            # Check for expired instant triggers in dev mode
+            if self.dev_mode:
+                self._check_instant_triggers()
+
             with self.config_lock:
                 pins_to_monitor = list(self.monitored_pins)
+                is_dev_mode = self.dev_mode
 
             for pin in pins_to_monitor:
-                if pin not in self.available_pins:
+                # In dev mode, all pins are available
+                if not is_dev_mode and pin not in self.available_pins:
                     continue
 
-                self._process_pin(pin)
+                # In dev mode, we don't poll hardware - state changes come from API
+                if not is_dev_mode:
+                    self._process_pin(pin)
 
             time.sleep(self.POLL_INTERVAL)
 

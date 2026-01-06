@@ -22,10 +22,7 @@ def get_available_pins() -> List[int]:
         except:
             pass
 
-    # Fallback to common Raspberry Pi GPIO pins if detection fails
-    if not available_pins:
-        available_pins = list(range(2, 28))
-
+    # No fallback - if no hardware, no pins available (use dev mode instead)
     return sorted(available_pins)
 
 
