@@ -117,9 +117,7 @@ chmod 755 ${PACKAGE_DIR}/usr/bin/gpio-monitor
 cp debian/gpio-monitor.service ${PACKAGE_DIR}/lib/systemd/system/
 chmod 644 ${PACKAGE_DIR}/lib/systemd/system/gpio-monitor.service
 
-# Create default config
-echo '{"port": 8787, "monitored_pins": []}' > ${PACKAGE_DIR}/etc/gpio-monitor/config.json
-chmod 644 ${PACKAGE_DIR}/etc/gpio-monitor/config.json
+# Config is created by postinst only if it doesn't exist (preserves existing config on upgrade)
 
 # Copy documentation
 if [ -f README.md ]; then
