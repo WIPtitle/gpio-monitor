@@ -20,6 +20,11 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
     # These will be set by the factory function in main
     monitor = None
     html_file = None
+    # Enable HTTP keep-alive so the alarm core reuses one warm TCP connection
+    # instead of reconnecting on every command. Requires a correct Content-Length
+    # on every non-streaming response (see _send_json_response / _serve_html /
+    # do_OPTIONS). The SSE /events stream is long-lived and unaffected.
+    protocol_version = "HTTP/1.1"
 
     def do_OPTIONS(self):
         """Handle CORS preflight requests."""
@@ -27,6 +32,7 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
     def do_GET(self):
@@ -81,17 +87,18 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_html(self):
         """Serve the HTML dashboard."""
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html')
-        self.end_headers()
-
         if os.path.exists(self.html_file):
             with open(self.html_file, 'r', encoding='utf-8') as f:
                 content = f.read()
         else:
             content = "<html><body><h1>GPIO Monitor</h1><p>HTML file not found.</p></body></html>"
 
-        self.wfile.write(content.encode())
+        body = content.encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_sse(self):
         """Serve Server-Sent Events stream."""
@@ -470,11 +477,13 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_json_response(self, code: int, data: Dict[str, Any]):
         """Send JSON response."""
+        body = json.dumps(data).encode()
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         """Suppress default logging."""
