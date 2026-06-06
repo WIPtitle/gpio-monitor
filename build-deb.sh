@@ -1,7 +1,7 @@
 #!/bin/bash
 
 PACKAGE_NAME="gpio-monitor"
-VERSION="2.1.1"
+VERSION="2.1.2"
 ARCH="all"
 MAINTAINER="Matteo Galvagni <galvagni.matteo@protonmail.com>"
 DESCRIPTION="GPIO real-time monitoring server with SSE and REST API support"

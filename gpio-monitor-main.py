@@ -37,7 +37,12 @@ def main():
     monitor_thread = threading.Thread(target=monitor.monitor_loop, daemon=True)
     monitor_thread.start()
 
-    # Start HTTP server
+    # Start HTTP server. allow_reuse_address (SO_REUSEADDR) lets the listener
+    # rebind immediately on restart instead of failing with EADDRINUSE while a
+    # previous connection (e.g. the core's long-lived SSE /events stream) lingers
+    # in TIME_WAIT on this port — without it the service flaps for ~20s on every
+    # restart/upgrade. (mp3-player-server and valve-controller already do this.)
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("", port), GPIORequestHandler) as httpd:
         print(f"GPIO Monitor started on port {port}")
         print(f"Web interface: http://localhost:{port}")
