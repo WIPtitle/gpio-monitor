@@ -4,6 +4,7 @@
 import http.server
 import json
 import os
+import queue
 import time
 from typing import Any, Dict
 
@@ -109,29 +110,35 @@ class GPIORequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
-        # Register client
-        self.monitor.clients.append(self.wfile)
+        # Register subscriber: a fresh, empty queue - no backlog/history,
+        # only events broadcast from here on will ever land in it.
+        client_queue = self.monitor.subscribe()
 
-        # Send initial state
-        init_data = {
-            "pins": self.monitor.get_all_virtual_states(),
-            "monitored": self.monitor.get_current_monitored_pins(),
-            "available": self.monitor.get_current_available_pins(),
-            "timestamp": int(time.time() * 1000),
-            "dev_mode": self.monitor.dev_mode
-        }
-
-        self.wfile.write(f"event: init\ndata: {json.dumps(init_data)}\n\n".encode())
-        self.wfile.flush()
-
-        # Keep connection alive
         try:
+            # Send initial state (current snapshot only)
+            init_data = {
+                "pins": self.monitor.get_all_virtual_states(),
+                "monitored": self.monitor.get_current_monitored_pins(),
+                "available": self.monitor.get_current_available_pins(),
+                "timestamp": int(time.time() * 1000),
+                "dev_mode": self.monitor.dev_mode
+            }
+
+            self.wfile.write(f"event: init\ndata: {json.dumps(init_data)}\n\n".encode())
+            self.wfile.flush()
+
+            # Stream only live events going forward; heartbeat while idle
             while True:
-                time.sleep(1)
-                self.wfile.write(f": heartbeat\n\n".encode())
+                try:
+                    message = client_queue.get(timeout=1)
+                    self.wfile.write(message.encode())
+                except queue.Empty:
+                    self.wfile.write(b": heartbeat\n\n")
                 self.wfile.flush()
         except:
             pass
+        finally:
+            self.monitor.unsubscribe(client_queue)
 
     def _get_all_pins(self):
         """Get all pins information."""

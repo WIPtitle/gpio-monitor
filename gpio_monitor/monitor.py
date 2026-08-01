@@ -2,6 +2,7 @@
 """Core monitoring logic for GPIO Monitor."""
 
 import json
+import queue
 import threading
 import time
 from datetime import datetime
@@ -29,7 +30,13 @@ class GPIOMonitor:
         # State tracking
         self.physical_states: Dict[int, int] = {}
         self.pending_changes: Dict[int, Dict] = {}
-        self.clients = []
+
+        # SSE subscribers: each is its own fresh, empty queue.Queue so a new
+        # subscriber only ever receives events broadcast after it subscribes
+        # (never a backlog), and one slow/flaky client can never block
+        # delivery to the others (or to the monitor loop).
+        self.clients: List["queue.Queue[str]"] = []
+        self.clients_lock = threading.Lock()
 
         # Configuration
         self.monitored_pins: List[int] = []
@@ -468,17 +475,35 @@ class GPIOMonitor:
 
         self.broadcast_event("gpio_change", event_data)
 
+    def subscribe(self) -> "queue.Queue[str]":
+        """
+        Register a new SSE subscriber.
+
+        Returns a brand-new, empty queue that will only ever receive events
+        broadcast from this point forward - no historical/buffered events.
+        """
+        client_queue: "queue.Queue[str]" = queue.Queue(maxsize=1000)
+        with self.clients_lock:
+            self.clients.append(client_queue)
+        return client_queue
+
+    def unsubscribe(self, client_queue: "queue.Queue[str]") -> None:
+        """Remove a subscriber's queue, e.g. once its connection drops."""
+        with self.clients_lock:
+            if client_queue in self.clients:
+                self.clients.remove(client_queue)
+
     def broadcast_event(self, event_type: str, data: Dict[str, Any]):
-        """Broadcast event to all connected clients."""
+        """Broadcast event to all connected clients (non-blocking)."""
         message = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
-        # Clean up closed clients
-        self.clients = [c for c in self.clients if not c.closed]
+        with self.clients_lock:
+            clients_snapshot = list(self.clients)
 
-        # Send to all clients
-        for client in self.clients:
+        # Enqueue for each subscriber; never blocks on a client's own socket
+        # I/O, so a stalled/flaky client can't delay delivery to anyone else.
+        for client_queue in clients_snapshot:
             try:
-                client.write(message.encode())
-                client.flush()
-            except:
+                client_queue.put_nowait(message)
+            except queue.Full:
                 pass
