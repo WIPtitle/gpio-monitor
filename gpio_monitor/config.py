@@ -3,6 +3,7 @@
 
 import json
 import os
+import tempfile
 from typing import Dict, List, Any
 
 # Config path from env var, default to /etc for production
@@ -13,16 +14,47 @@ DEFAULT_PORT = 8787
 def load_config() -> Dict[str, Any]:
     """Load configuration from file (standalone function for CLI compatibility)."""
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # Corrupt/truncated config -> fall back to defaults instead of crashing.
+            pass
     return {"port": DEFAULT_PORT, "monitored_pins": [], "pin_config": {}}
+
+
+def atomic_write_json(path: str, data: Dict[str, Any]) -> None:
+    """Crash-safe JSON write: temp file + fsync + atomic rename + dir fsync.
+
+    On power loss the target is left as either the complete old file or the
+    complete new one -- never truncated.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+        dir_fd = os.open(directory, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def save_config(config: Dict[str, Any]) -> None:
     """Save configuration to file (standalone function for CLI compatibility)."""
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
+    atomic_write_json(CONFIG_FILE, config)
 
 
 class ConfigManager:
@@ -39,18 +71,21 @@ class ConfigManager:
     def load(self) -> Dict[str, Any]:
         """Load configuration from file. Creates default config if not exists."""
         if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                return json.load(f)
-        # Create default config file
+            try:
+                with open(self.config_file, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                # Corrupt/truncated config -> recreate a fresh default below.
+                pass
+        # Create default config file (missing or corrupt)
         default_config = self.get_default_config()
         self.save(default_config)
         return default_config
 
     def save(self, config: Dict[str, Any]) -> None:
-        """Save configuration to file."""
+        """Save configuration to file (crash-safe atomic write)."""
         self._ensure_config_dir()
-        with open(self.config_file, 'w') as f:
-            json.dump(config, f, indent=2)
+        atomic_write_json(self.config_file, config)
 
     def get_default_config(self) -> Dict[str, Any]:
         """Get default configuration."""
